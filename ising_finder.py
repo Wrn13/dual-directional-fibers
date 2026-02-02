@@ -15,7 +15,7 @@ from hamiltonian_params import single_dual_params
 np.set_printoptions(linewidth=10000000, threshold=1000000)
 tr.set_printoptions(linewidth=1000)
 tr.set_default_dtype(tr.float64)
-rng = np.random.default_rng(seed=5)
+rng = np.random.default_rng(seed=7)
 
 
 def kron_prod(op_list):
@@ -205,10 +205,10 @@ if __name__ == "__main__":
         duplicates = lambda U, v: (np.fabs(U - v) < 0.1).all(axis=0)
         R = fx.get_unique_points(R, duplicates)
 
-        with open("krammerswanier.pkl", "wb") as f:
+        with open("results/krammerswanier_random_seed7.pkl", "wb") as f:
             pk.dump((c_targ, V, A, R), f)
 
-    with open("krammerswanier.pkl", "rb") as f:
+    with open("results/krammerswanier_random_seed7.pkl", "rb") as f:
         (c_targ, V, A, R) = pk.load(f)
 
     get_loss = get_loss_factory(c_targ)
@@ -281,27 +281,27 @@ if __name__ == "__main__":
     pt.tight_layout()
     pt.show()
 
-    # Find unitary to go between TPS
-    Hs = get_Hamiltonian(tr.tensor(R.T))
+    # # Find unitary to go between TPS
+    # Hs = get_Hamiltonian(tr.tensor(R.T))
 
-    H_0, H_p = [Hs[0], Hs[-1]]
-    D_0, V_0 = tr.linalg.eig(H_0)
-    D_p, V_p = tr.linalg.eig(H_p)
+    # H_0, H_p = [Hs[0], Hs[-1]]
+    # D_0, V_0 = tr.linalg.eig(H_0)
+    # D_p, V_p = tr.linalg.eig(H_p)
 
-    print(V_p.shape)
-    U = V_p @ tr.inverse(V_0)
-    print("Unitary Change of Base Matrix:")
-    print(U)
+    # print(V_p.shape)
+    # U = V_p @ tr.inverse(V_0)
+    # print("Unitary Change of Base Matrix:")
+    # print(U)
 
-    print(U.shape)
+    # print(U.shape)
 
-    indices = range(U.shape[0])
+    # indices = range(U.shape[0])
 
-    normed_change_of_base_unitary = np.abs(U.numpy())
-    pt.imshow(normed_change_of_base_unitary, cmap="viridis")
-    pt.title("Change of base unitary between Ising duals")
-    pt.xlabel("Dual Indices")
-    pt.ylabel("Original Indices")
-    pt.title("Change of base unitary magnitudes")
-    pt.colorbar()
-    pt.show()
+    # normed_change_of_base_unitary = np.abs(U.numpy())
+    # pt.imshow(normed_change_of_base_unitary, cmap="viridis")
+    # pt.title("Change of base unitary between Ising duals")
+    # pt.xlabel("Dual Indices")
+    # pt.ylabel("Original Indices")
+    # pt.title("Change of base unitary magnitudes")
+    # pt.colorbar()
+    # pt.show()
