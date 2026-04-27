@@ -34,7 +34,7 @@ pauli = [
 ]
 
 # number of qubits
-n_qb = 3
+n_qb = 6
 
 
 def get_Hamiltonian(c):
@@ -50,25 +50,33 @@ def get_Hamiltonian(c):
             interaction_list = I_list[:]
             interaction_list[i] = pauli[p]
             interaction_list[i + 1] = pauli[p]
+            # 0, 1, 2 are xx, yy, zz interactions
+            H += c[:, p-1].view(K,1,1) * kron_prod(interaction_list)
 
+
+        for p in range(1,3):
             single_term = I_list[:]
             single_term[i] = pauli[p]
 
-            H += c[:, p - 1].view(K, 1, 1) * kron_prod(interaction_list) + c[
+            # 3, 4 are x and y single site terms
+            H +=c[
                 :, 3 + p - 1
             ].view(K, 1, 1) * kron_prod(single_term)
 
     # Boundary Terms
-    for p in range(1, 4):
+    # x and y
+    for p in range(1, 3):
         site_one = I_list[:]
         site_one[0] = pauli[p]
 
         site_N = I_list[:]
         site_N[n_qb - 1] = pauli[p]
-
-        H += c[None, :, 6 + p - 1].view(K, 1, 1) * kron_prod(site_one) + c[
-            None, :, 9 + p - 1
+        # 5, 6 are x and y boundary terms on first site
+        # 7, 8 are x and y boundary terms on last site
+        H += c[None, :, 5 + p - 1].view(K, 1, 1) * kron_prod(site_one) + c[
+            None, :, 7 + p - 1
         ].view(K, 1, 1) * kron_prod(site_N)
+
 
     return H
 
@@ -134,85 +142,82 @@ if __name__ == "__main__":
     mp.rcParams["font.family"] = "serif"
     mp.rcParams["text.usetex"] = True
 
-    do_fiber = True
-    for i in range(0, 4):
-        # constant direction
-        c_dir = np.array([[rng.normal() for _ in range(12)]]).T
-        print("DIRECTION: ", c_dir)
-        if do_fiber:
-            try:
-                h = 1.5
-                J = 1
-                c_targ = tr.tensor([[0, 0, J, h, 0, 0, 0, 0, 0, h, 0, 0]])
-                # c_targ = tr.tensor([[0, 0, h, J, 0, 0, 0, 0, h, 0, 0, 0]])
-                # c_targ = tr.tensor(
-                #    [[0.1, 0.11, 0.111, 1, 1.1, 0.12, 0.13, 0.02, 0.21, 0.9, 0.3, 0.01]]
-                # )
-                get_loss = get_loss_factory(c_targ)
-                f = f_factory(get_loss)
-                Df = Df_factory(get_loss)
+    do_fiber = False
 
-                # get initial fiber point
-                v0 = c_targ.numpy().T
+    # constant direction
+    c_dir = np.array([[rng.normal() for _ in range(9)]]).T
+    if do_fiber:
+        h = 1.5
+        J = 1
+        # c_targ = tr.tensor([[0, 0, J, h, 0, 0, 0, 0, 0, h, 0, 0]])
+        # sxsx, sysy, szsz, sx, sy, sx0, sy0, sxN, syN
+        c_targ = tr.tensor([[0, 0, J, h, 0, 0, 0, h, 0]])
+        # c_targ = tr.tensor(
+        #    [[0.1, 0.11, 0.111, 1, 1.1, 0.12, 0.13, 0.02, 0.21, 0.9, 0.3, 0.01]]
+        # )
+        get_loss = get_loss_factory(c_targ)
+        f = f_factory(get_loss)
+        Df = Df_factory(get_loss)
 
-                # # f(v0) = 0, so use default random choice of direction vector
+        # get initial fiber point
+        v0 = c_targ.numpy().T
 
-                with open("DiffHamiltonain.txt", "w") as file:
-                    file.write(str(get_Hamiltonian(c_targ).numpy()[0]))
+        # # f(v0) = 0, so use default random choice of direction vector
 
-                # Set up fiber arguments
-                fiber_kwargs = {
-                    "f": f,
-                    "Df": Df,
-                    "ef": ef,
-                    "compute_step_amount": lambda trace: (0.1, 0, False),
-                    "v": v0,
-                    "c": c_dir,
-                    "terminate": lambda trace: (
-                        get_loss(tr.tensor(trace.x[:12].T)) > 0.1
-                    ).any(),
-                    "max_step_size": 100,
-                    "max_traverse_steps": 1000,  # 000,
-                    "max_solve_iterations": 2**6,
-                    "logger": Logger(sys.stdout),
-                }
+        with open("DiffHamiltonain.txt", "w") as file:
+            file.write(str(get_Hamiltonian(c_targ).numpy()[0]))
 
-                # Run in one direction
-                solution = sv.fiber_solver(**fiber_kwargs)
-                X1 = np.concatenate(solution["Fiber trace"].points, axis=1)
-                V1 = X1[:-1, :]
-                A1 = X1[-1, :]
-                R1 = solution["Fixed points"]
-                z = solution["Fiber trace"].z_initial
+        # Set up fiber arguments
+        fiber_kwargs = {
+            "f": f,
+            "Df": Df,
+            "ef": ef,
+            "compute_step_amount": lambda trace: (0.1, 0, False),
+            "v": v0,
+            "c": c_dir,
+            "terminate": lambda trace: (
+                get_loss(tr.tensor(trace.x[:12].T)) > .1
+            ).any(),
+            "max_step_size": 100,
+            "max_traverse_steps": 50000,  # 000,
+            "max_solve_iterations": 2**6,
+            "logger": Logger(sys.stdout),
+        }
 
-                # Run in other direction (negate initial tangent)
-                fiber_kwargs["z"] = -z
-                solution = sv.fiber_solver(**fiber_kwargs)
-                X2 = np.concatenate(solution["Fiber trace"].points, axis=1)
-                V2 = X2[:-1, :]
-                A2 = X2[-1, :]
-                R2 = solution["Fixed points"]
+        # Run in one direction
+        solution = sv.fiber_solver(**fiber_kwargs)
+        X1 = np.concatenate(solution["Fiber trace"].points, axis=1)
+        V1 = X1[:-1, :]
+        A1 = X1[-1, :]
+        R1 = solution["Fixed points"]
+        z = solution["Fiber trace"].z_initial
+        print(len(A1))
 
-                # Join fiber segments and roots
-                V = np.concatenate((np.fliplr(V1), V2), axis=1)
-                A = np.concatenate((A1[::-1], A2), axis=0)
-                R = np.concatenate((R1, R2), axis=1)
+        # Run in other direction (negate initial tangent)
+        fiber_kwargs["z"] = -z
+        solution = sv.fiber_solver(**fiber_kwargs)
+        X2 = np.concatenate(solution["Fiber trace"].points, axis=1)
+        V2 = X2[:-1, :]
+        A2 = X2[-1, :]
+        R2 = solution["Fixed points"]
+        print(len(A2))
 
-                R, fixed = fx.refine_points(R, f, ef, Df)
-                R = R[:, fixed]
+        # Join fiber segments and roots
+        V = np.concatenate((np.fliplr(V1), V2), axis=1)
+        A = np.concatenate((A1[::-1], A2), axis=0)
+        R = np.concatenate((R1, R2), axis=1)
 
-                duplicates = lambda U, v: (np.fabs(U - v) < 0.1).all(axis=0)
-                R = fx.get_unique_points(R, duplicates)
+        R, fixed = fx.refine_points(R, f, ef, Df)
+        R = R[:, fixed]
 
-                print("Finished ", i)
-                with open(f"results/ising_random_dirs_3_qubit3/{i}.pkl", "wb") as f:
-                    pk.dump((c_dir, c_targ, V, A, R), f)
-            except Exception as e:
-                print("Error in fiber solver: ", e)
-                continue
+        duplicates = lambda U, v: (np.fabs(U - v) < 0.1).all(axis=0)
+        R = fx.get_unique_points(R, duplicates)
 
-    with open("results/ising_random_dirs_3_qubit3/0.pkl", "rb") as f:
-        (c_dir, c_targ, V, A, R) = pk.load(f)
+        with open(f"results/reduced_run2.pkl", "wb") as f:
+            pk.dump((c_targ, V, A, R), f)
+
+    with open("results/reduced_run2.pkl", "rb") as f:
+        (c_targ, V, A, R) = pk.load(f)
 
     get_loss = get_loss_factory(c_targ)
     f = f_factory(get_loss)
@@ -251,12 +256,14 @@ if __name__ == "__main__":
     trace_loss = get_loss(tr.tensor(V.T))
     local_min = np.flatnonzero(
         (trace_loss[1:-1] <= trace_loss[2:]) & (trace_loss[1:-1] <= trace_loss[:-2])
-    ) + 1
+    )
 
     # pt.plot(A)
     # pt.show()
 
     fig = pt.figure(figsize=(4, 2))
+
+    
 
     pt.subplot(1, 2, 1)
     # pt.plot(diffs.numpy().T)
@@ -265,17 +272,13 @@ if __name__ == "__main__":
 
     pt.title("Loss Landscape with J=1, H=1.5 Ising Model")
     pt.plot(trace_loss, "k-")
-    pt.plot(local_min[0],0, "bo")
-    pt.plot(local_min[1],0, "ro")
-    pt.plot(local_min[-1],0, "go")
+    pt.plot(local_min, [0] * len(local_min), "bo")
     pt.ylabel("$||\\Lambda - \\Lambda_0||^2$")
     pt.xlabel("Step along fiber")
 
     pt.subplot(1, 2, 2)
     pt.title("Coefficient Values on J=1 H=1.5 Ising Model")
-    pt.plot(R[:, 0], "b-")
-    pt.plot(R[:, 1], "r-")
-    pt.plot(R[:, -1], "g-")
+    pt.plot(R[:, :], "b-")
     pt.xlabel("Coefficient index")
     pt.ylabel("Coefficient value")
     pt.ylim([-1.5, 2])
