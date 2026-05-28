@@ -65,7 +65,8 @@ if __name__ == "__main__":
     print(c.T)
 
     # Visualize strange attractor
-    ax = pt.gca(projection="3d")
+    fig = pt.figure()
+    ax = fig.add_subplot(projection="3d")
     ax.plot(*A, color='gray', linestyle='-', alpha=0.5)
     br1 = np.sqrt(b*(r-1))
     U = np.array([[0, 0, 0],[br1,br1,r-1],[-br1,-br1,r-1]]).T

@@ -98,7 +98,6 @@ def get_loss_factory(c0):
 
     return get_loss
 
-
 def f_factory(get_loss):
     def f(v):
         # v is (9, K) numpy array, return (9, K) batch of gradients
@@ -132,9 +131,9 @@ def ef(v):
 
 if __name__ == "__main__":
     mp.rcParams["font.family"] = "serif"
-    mp.rcParams["text.usetex"] = True
+    mp.rcParams["text.usetex"] = False
 
-    do_fiber = True
+    do_fiber = False
 
     # constant direction
     c_dir = np.array([[rng.normal() for _ in range(12)]]).T
@@ -205,10 +204,10 @@ if __name__ == "__main__":
         duplicates = lambda U, v: (np.fabs(U - v) < 0.1).all(axis=0)
         R = fx.get_unique_points(R, duplicates)
 
-        with open("krammerswanier.pkl", "wb") as f:
+        with open("results/krammerswanier.pkl", "wb") as f:
             pk.dump((c_targ, V, A, R), f)
 
-    with open("krammerswanier.pkl", "rb") as f:
+    with open("results/krammerswanier_random_seed3.pkl", "rb") as f:
         (c_targ, V, A, R) = pk.load(f)
 
     get_loss = get_loss_factory(c_targ)
@@ -262,20 +261,20 @@ if __name__ == "__main__":
 
     pt.title("Loss Landscape with J=1, H=1.5 Ising Model")
     pt.plot(trace_loss, "k-")
-    pt.plot(local_min[0], 0, "bo")
-    pt.plot(local_min[1], 0, "ro")
-    pt.plot(local_min[-1], 0, "go")
+    #pt.plot(local_min[0], 0, "bo")
+    #t.plot(local_min[1], 0, "ro")
+    #pt.plot(local_min[-1], 0, "go")
     pt.ylabel("$||\\Lambda - \\Lambda_0||^2$")
     pt.xlabel("Step along fiber")
 
-    pt.subplot(1, 2, 2)
-    pt.title("Coefficient Values on J=1 H=1.5 Ising Model")
-    pt.plot(R[:, 0], "b-")
-    pt.plot(R[:, 1], "r-")
-    pt.plot(R[:, -1], "g-")
-    pt.xlabel("Coefficient index")
-    pt.ylabel("Coefficient value")
-    pt.ylim([-1.5, 2])
+    #pt.subplot(1, 2, 2)
+    #pt.title("Coefficient Values on J=1 H=1.5 Ising Model")
+    #pt.plot(R[:, 0], "b-")
+    #pt.plot(R[:, 1], "r-")
+    #pt.plot(R[:, -1], "g-")
+    #pt.xlabel("Coefficient index")
+    #pt.ylabel("Coefficient value")
+    #pt.ylim([-1.5, 2])
 
     # fig.suptitle("SA2")
     pt.tight_layout()
