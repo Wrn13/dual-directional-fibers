@@ -137,7 +137,7 @@ def _spline_derivs(y, t, orders, k=4, s_smooth=0.0):
             out[o][:, j] = splev(t, tck, der=o)
     return {o: out[o].reshape(y.shape) for o in orders}
 
-def curvature_findiff(X):
+def find_curvature_normal(X, straight_tol=1e-12):
     """
     First curvature of a sampled curve in R^n via finite differences.
 
@@ -152,9 +152,14 @@ def curvature_findiff(X):
     ----------
     points : (N, n) array_like
         Sample points along the curve, any ambient dimension n >= 2.
-
+    straight_tol : float
+        Threshold below which |a_perp| is treated as zero (curve is
+        locally straight); the corresponding normal is returned as the
+        zero vector.
     Returns
     -------
+    normal : (N, n) ndarray
+        Normal vector at each sample.
     kappa : (N,) ndarray
         Curvature at each sample. Endpoints are less accurate because
         np.gradient falls back to one-sided differences there.
@@ -178,10 +183,22 @@ def curvature_findiff(X):
     acc_sq   = (X_ddot * X_ddot).sum(axis=1)   # |a|^2
     v_dot_a  = (X_dot     * X_ddot).sum(axis=1)   # v . a
 
+    # Acceleration component perpendicular to velocity (direction of bending).
+    # a_perp[i] = X_ddot[i] - (v.a / |v|^2)_i * X_dot[i]
+    a_perp = X_ddot - (v_dot_a / speed_sq)[:, None] * X_dot
+    a_perp_norm = np.linalg.norm(a_perp, axis=1)
+
+    # Unit principal normal (zero where the curve is locally straight).
+    normal = np.zeros_like(X)
+    has_curvature = a_perp_norm > straight_tol
+    normal[has_curvature] = a_perp[has_curvature] / a_perp_norm[has_curvature, None]
+
     # Lagrange identity: |v wedge a|^2 = |v|^2|a|^2 - (v.a)^2.
     # The max(., 0) clip guards against tiny negative results from
     # floating-point cancellation when v and a are nearly parallel.
     wedge_sq = np.maximum(speed_sq * acc_sq - v_dot_a**2, 0.0)
 
     kappa = np.sqrt(wedge_sq) / speed_sq**1.5
-    return kappa, t
+
+
+    return normal, kappa, t

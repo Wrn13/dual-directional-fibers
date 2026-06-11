@@ -295,7 +295,7 @@ def traverse_fiber(
         # Check for maximum fiber history
         if max_history is not None and len(trace.points) > max_history:
             trace.halve_points(abs_alpha_min)
-        
+    
     # final output
     if logger is not None: logger.log("Status: %s\n"%trace.status)
     return trace

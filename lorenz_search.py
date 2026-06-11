@@ -61,8 +61,6 @@ if __name__ == "__main__":
         "max_traverse_steps": 2000,
         "max_solve_iterations": 2**5,
     }
-    print("using c:")
-    print(c.T)
 
     # Visualize strange attractor
     fig = pt.figure()
@@ -75,50 +73,88 @@ if __name__ == "__main__":
     Curvature = None
     # Run and visualize fiber components, for each fxpt
     xlims, ylims, zlims = [-20,20], [-30,30], [-20,60]
-    for fc in [0,2]:
 
-        # start from current fxpt
-        fiber_kwargs["v"] = U[:,[fc]]
-        # ax.text(U[0,fc],U[1,fc],U[2,fc], str(fc))
+    ### Run direcitonal fiber starting at the origin
+    # start from current fxpt
+    fiber_kwargs["v"] = U[:,[0]]
+    # ax.text(U[0,fc],U[1,fc],U[2,fc], str(fc))
+
+    # Run in one direction
+    solution = sv.fiber_solver(**fiber_kwargs)
+    V1 = np.concatenate(solution["Fiber trace"].points, axis=1)[:N,:]
+    z = solution["Fiber trace"].z_initial
+
+    # Run in other direction (negate initial tangent)
+    fiber_kwargs["z"] = -z
+    solution = sv.fiber_solver(**fiber_kwargs)
+    V2 = np.concatenate(solution["Fiber trace"].points, axis=1)[:N,:]
+
+    # Join fiber segments, restrict to figure limits
+    V = np.concatenate((np.fliplr(V1)[:,:-1], V2), axis=1)
+
+    normal, kappa, t = nu.find_curvature_normal(V.T)        # V is (3, M); transpose to (M, 3)
+    # Mark the top-k high-curvature samples on the 3D plot
+    top_k = 5
+    top_idx = np.argpartition(kappa, -top_k)[-top_k:]
+    
+    highest_curvature_idx = top_idx[-1]
+    highest_curvature_point = V[:,highest_curvature_idx]
+
+    ax.scatter(*V[:, highest_curvature_idx], color='red', s=40, zorder=5)
+    # Stash for the per-fiber plot below
+    if Curvature is None:
+        Curvature = {}
+    Curvature[0] = (V.copy(), kappa, t)
+
+    V = V[:,::50]
+    for i, (lo, hi) in enumerate([xlims, ylims, zlims]):
+        V = V[:,(lo < V[i,:]) & (V[i,:] < hi)]
+    C = f(V)
+    
+    ### Perturb highest curvature point by some amount normal to the fiber.
+
+    # Strength list
+    perturbation_strengths = np.linspace(-20, 20, 5)
+
+    # Direction 
+    normal_direction = normal[highest_curvature_idx]
+
+    # Colors
+    jet_5 = pt.colormaps['jet'](np.linspace(0,1,len(perturbation_strengths)))
+
+    for perturbation_strength,color in zip(perturbation_strengths, jet_5):
+        displacement = perturbation_strength * normal_direction
+        new_initial_point = displacement + highest_curvature_point
+
+        fiber_kwargs["v"] = new_initial_point[:,None]
 
         # Run in one direction
         solution = sv.fiber_solver(**fiber_kwargs)
-        V1 = np.concatenate(solution["Fiber trace"].points, axis=1)[:N,:]
-        z = solution["Fiber trace"].z_initial
+        V1p = np.concatenate(solution["Fiber trace"].points, axis=1)[:N,:]
+        zp = solution["Fiber trace"].z_initial
 
         # Run in other direction (negate initial tangent)
-        fiber_kwargs["z"] = -z
+        fiber_kwargs["z"] = -zp
         solution = sv.fiber_solver(**fiber_kwargs)
-        V2 = np.concatenate(solution["Fiber trace"].points, axis=1)[:N,:]
-    
+        V2p = np.concatenate(solution["Fiber trace"].points, axis=1)[:N,:]
+
         # Join fiber segments, restrict to figure limits
-        V = np.concatenate((np.fliplr(V1)[:,:-1], V2), axis=1)
+        Vp = np.concatenate((np.fliplr(V1p)[:,:-1], V2p), axis=1)
 
-        normal, kappa, t = nu.find_curvature_normal(V.T)        # V is (3, M); transpose to (M, 3)
-        # Mark the top-k high-curvature samples on the 3D plot
-        top_k = 5
-        top_idx = np.argpartition(kappa, -top_k)[-top_k:]
-        ax.scatter(*V[:, top_idx], color='red', s=40, zorder=5)
+        ax.scatter(*new_initial_point, color="blue")
+        ax.plot(*Vp, color=color, linestyle='-', label=f"Strength = {np.round(perturbation_strength,2)}")
 
-        # Stash for the per-fiber plot below
-        if Curvature is None:
-            Curvature = {}
-        Curvature[fc] = (V.copy(), kappa, t)
-
-        V = V[:,::50]
-        for i, (lo, hi) in enumerate([xlims, ylims, zlims]):
-            V = V[:,(lo < V[i,:]) & (V[i,:] < hi)]
-        C = f(V)
-
-        
-        # Visualize fiber
-        ax.plot(*V, color='black', linestyle='-')
-        ax.quiver(*np.concatenate((V,.1*C),axis=0),color='black')
+    
+    # Visualize original fiber fiber
+    ax.plot(*V, color='black', linestyle='-')
+    ax.quiver(*np.concatenate((V,.1*C),axis=0),color='black')
+    ax.quiver(*np.concatenate((highest_curvature_point, normal_direction), axis=0), color='red')
 
     ax.set_xlabel("x")
     ax.set_ylabel("y")
     ax.set_zlabel("z")
     ax.view_init(elev=15,azim=145)
+    ax.legend()
     pt.tight_layout()
     pt.show()
 
