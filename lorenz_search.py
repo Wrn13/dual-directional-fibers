@@ -94,7 +94,7 @@ if __name__ == "__main__":
 
     normal, kappa, t = nu.find_curvature_normal(V.T)        # V is (3, M); transpose to (M, 3)
     # Mark the top-k high-curvature samples on the 3D plot
-    top_k = 5
+    top_k = 1
     top_idx = np.argpartition(kappa, -top_k)[-top_k:]
     
     highest_curvature_idx = top_idx[-1]
@@ -114,10 +114,11 @@ if __name__ == "__main__":
     ### Perturb highest curvature point by some amount normal to the fiber.
 
     # Strength list
-    perturbation_strengths = np.linspace(-20, 20, 5)
+    perturbation_strengths = np.linspace(-10, 10, 5)
 
     # Direction 
     normal_direction = normal[highest_curvature_idx]
+
 
     # Colors
     jet_5 = pt.colormaps['jet'](np.linspace(0,1,len(perturbation_strengths)))
@@ -149,7 +150,7 @@ if __name__ == "__main__":
     ax.plot(*V, color='black', linestyle='-')
     ax.quiver(*np.concatenate((V,.1*C),axis=0),color='black')
     ax.quiver(*np.concatenate((highest_curvature_point, normal_direction), axis=0), color='red')
-
+    ax.set_title(f"Lorentz restarting with direction={normal_direction}")
     ax.set_xlabel("x")
     ax.set_ylabel("y")
     ax.set_zlabel("z")
@@ -163,7 +164,7 @@ if len(Curvature) == 1:
     axes = [axes]
 for ax2, (fc, (V_fc, kappa_fc, t_fc)) in zip(axes, Curvature.items()):
     ax2.plot(kappa_fc, 'k-')
-    top_k = 5
+    top_k = 1
     top_idx = np.argpartition(kappa_fc, -top_k)[-top_k:]
     ax2.scatter(top_idx, kappa_fc[top_idx], color='red', zorder=5)
     ax2.set_title(f"Curvature along fiber through fixed point {fc}")

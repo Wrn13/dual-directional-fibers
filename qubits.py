@@ -10,6 +10,7 @@ import dfibers.solvers as sv
 import dfibers.traversal as tv
 import dfibers.fixed_points as fx
 from dfibers.logging_utilities import Logger
+import dfibers.numerical_utilities as nu
 from hamiltonian_params import single_dual_params
 import hamiltonian_params
 
@@ -177,7 +178,7 @@ if __name__ == "__main__":
         with open("qubits.pkl", "wb") as f:
             pk.dump((c_targ, V, A, R), f)
 
-    with open("qubits.pkl", "rb") as f:
+    with open("results/qubits.pkl", "rb") as f:
         (c_targ, V, A, R) = pk.load(f)
 
     get_loss = get_loss_factory(c_targ)
@@ -213,12 +214,15 @@ if __name__ == "__main__":
         (trace_loss[1:-1] <= trace_loss[2:]) & (trace_loss[1:-1] <= trace_loss[:-2])
     )
 
+    normal, kappa, t = nu.find_curvature_normal(V.T)
+    
+
     # pt.plot(A)
     # pt.show()
 
     fig = pt.figure(figsize=(4, 2))
 
-    pt.subplot(1, 2, 1)
+    pt.subplot(1, 3, 1)
     # pt.plot(diffs.numpy().T)
     # pt.xlabel("$i$")
     # pt.ylabel("$\\lambda_i - \\lambda^*_i$")
@@ -229,8 +233,14 @@ if __name__ == "__main__":
     pt.plot(local_min[1], 0, "ro")
     pt.ylabel("$||\\Lambda - \\Lambda_0||^2$")
     pt.xlabel("Step along fiber")
+    
+    pt.subplot(1, 3, 2)
+    pt.plot(np.linspace(0,len(kappa), len(kappa)), kappa)
+    pt.title("Curvature across fiber")
+    pt.xlabel("Index")
+    pt.ylabel("Curvature")
 
-    pt.subplot(1, 2, 2)
+    pt.subplot(1, 3, 3)
     pt.title("Coefficient Values on Terms")
     pt.plot(R[:, 0], "b-")
     pt.plot(R[:, 1], "r-")
@@ -240,30 +250,4 @@ if __name__ == "__main__":
 
     # fig.suptitle("SA2")
     pt.tight_layout()
-    pt.show()
-
-    # Unitary that goes between duals
-    H_0, H_p = get_Hamiltonian(tr.tensor(R.T))
-
-    D_0, V_0 = tr.linalg.eig(H_0)
-    D_p, V_p = tr.linalg.eig(H_p)
-
-    print(V_p.shape)
-    U = V_p @ tr.inverse(V_0)
-    print("Unitary Change of Base Matrix:")
-    print(U)
-
-    print(U.shape)
-
-    print(tr.adjoint(U) @ U)
-
-    indices = range(U.shape[0])
-
-    normed_change_of_base_unitary = np.abs(U.numpy())
-    print(np.abs(U.numpy()))
-    pt.imshow(np.log(normed_change_of_base_unitary), cmap="viridis")
-    pt.xlabel("Dual Indices")
-    pt.ylabel("Original Indices")
-    pt.title("Change of base unitary magnitudes")
-    pt.colorbar()
     pt.show()
