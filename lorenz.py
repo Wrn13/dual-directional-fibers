@@ -75,7 +75,7 @@ if __name__ == "__main__":
     Curvature = None
     # Run and visualize fiber components, for each fxpt
     xlims, ylims, zlims = [-20,20], [-30,30], [-20,60]
-    for fc in [0,2]:
+    for fc in [0]:
 
         # start from current fxpt
         fiber_kwargs["v"] = U[:,[fc]]
@@ -98,22 +98,24 @@ if __name__ == "__main__":
         # Mark the top-k high-curvature samples on the 3D plot
         top_k = 5
         top_idx = np.argpartition(kappa, -top_k)[-top_k:]
-        ax.scatter(*V[:, top_idx], color='red', s=40, zorder=5)
+        ax.scatter(*V[:, top_idx], color='red')
 
         # Stash for the per-fiber plot below
         if Curvature is None:
             Curvature = {}
         Curvature[fc] = (V.copy(), kappa, t)
 
-        V = V[:,::50]
+        V = V
         for i, (lo, hi) in enumerate([xlims, ylims, zlims]):
             V = V[:,(lo < V[i,:]) & (V[i,:] < hi)]
         C = f(V)
 
+        print(V)
+        print(kappa)
         
         # Visualize fiber
-        ax.plot(*V, color='black', linestyle='-')
-        ax.quiver(*np.concatenate((V,.1*C),axis=0),color='black')
+        ax.scatter(*V, color='black')
+        #ax.quiver(*np.concatenate((V,.1*C),axis=0),color='black')
 
     ax.set_xlabel("x")
     ax.set_ylabel("y")
