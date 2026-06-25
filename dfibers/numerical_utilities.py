@@ -137,7 +137,89 @@ def _spline_derivs(y, t, orders, k=4, s_smooth=0.0):
             out[o][:, j] = splev(t, tck, der=o)
     return {o: out[o].reshape(y.shape) for o in orders}
 
-def find_curvature_normal(X, straight_tol=1e-12):
+
+def _fornberg_weights(z, x, m):
+    """
+    Fornberg's algorithm for finite-difference weights on arbitrary grids.
+
+    Computes the weights c[k] such that
+        f^(m)(z) ≈ sum_k c[k] f(x[k])
+    where x is a list of stencil points (not necessarily equally spaced)
+    and m is the order of the derivative.
+
+    Reference: Fornberg, Math. Comp. 51 (1988), 699-706, eq. (3.1)-(3.6);
+    cleaner recursion in Fornberg, SIAM Review 40 (1998), 685-691.
+
+    Parameters
+    ----------
+    z : float, the point at which the derivative is evaluated
+    x : (S,) array, the stencil node locations
+    m : int, derivative order (0 = function value, 1 = first deriv, ...)
+
+    Returns
+    -------
+    c : (S,) array of weights
+    """
+    n = len(x) - 1               # highest stencil index
+    assert m <= n, "Need at least m+1 stencil points for an m-th derivative"
+    C = np.zeros((n + 1, m + 1))
+    C[0, 0] = 1.0
+    c1 = 1.0
+    c4 = x[0] - z
+    for i in range(1, n + 1):
+        mn = min(i, m)
+        c2 = 1.0
+        c5 = c4
+        c4 = x[i] - z
+        for j in range(i):
+            c3 = x[i] - x[j]
+            c2 *= c3
+            if j == i - 1:
+                for k in range(mn, 0, -1):
+                    C[i, k] = c1 * (k * C[i - 1, k - 1] - c5 * C[i - 1, k]) / c2
+                C[i, 0] = -c1 * c5 * C[i - 1, 0] / c2
+            for k in range(mn, 0, -1):
+                C[j, k] = (c4 * C[j, k] - k * C[j, k - 1]) / c3
+            C[j, 0] = c4 * C[j, 0] / c3
+        c1 = c2
+    return C[:, m]
+
+
+def _fd_derivatives(X, t, deriv_orders, accuracy):
+    """
+    Finite-difference derivatives of X(t) at every sample, with given
+    truncation order, on non-uniform grid t.
+
+    accuracy : int, even
+        Target truncation order. Stencil width is (accuracy + max_deriv),
+        which is the minimum number of points needed for that order
+        accuracy on the largest derivative requested.
+    deriv_orders : list of int, orders to compute (e.g. [1, 2])
+
+    Returns dict mapping deriv order -> (N, n) array of derivative values.
+    """
+    X = np.asarray(X, dtype=float)
+    t = np.asarray(t, dtype=float)
+    N, dim = X.shape
+    m_max = max(deriv_orders)
+    stencil_width = accuracy + m_max          # number of stencil points
+    half = stencil_width // 2
+
+    out = {m: np.empty_like(X) for m in deriv_orders}
+
+    for i in range(N):
+        # Choose stencil window: centered if interior, shifted near edges.
+        lo = max(0, i - half)
+        hi = min(N, lo + stencil_width)
+        lo = max(0, hi - stencil_width)        # re-center if we hit right edge
+        x_stencil = t[lo:hi]
+        for m in deriv_orders:
+            w = _fornberg_weights(t[i], x_stencil, m)
+            out[m][i] = w @ X[lo:hi]
+    return out
+
+
+def find_curvature_normal(X, straight_tol=1e-12, truncation_order=1):
     """
     First curvature of a sampled curve in R^n via finite differences.
 
@@ -174,7 +256,10 @@ def find_curvature_normal(X, straight_tol=1e-12):
     segment_lengths = np.linalg.norm(np.diff(X, axis=0), axis=1)
     t = np.concatenate(([0.0], np.cumsum(segment_lengths)))
 
-    # Numerical derivatives along the curve.
+
+    #derivs = _fd_derivatives(X, t, deriv_orders=[1, 2], accuracy=truncation_order)
+    #X_dot, X_ddot = derivs[1], derivs[2]
+    #Numerical derivatives along the curve.
     X_dot     = np.gradient(X,   t, axis=0)
     X_ddot = np.gradient(X_dot, t, axis=0)
 
@@ -185,7 +270,7 @@ def find_curvature_normal(X, straight_tol=1e-12):
 
     # Acceleration component perpendicular to velocity (direction of bending).
     # a_perp[i] = X_ddot[i] - (v.a / |v|^2)_i * X_dot[i]
-    a_perp = X_ddot - (v_dot_a / speed_sq)[:, None] * X_dot
+    a_perp = X_ddot #- (v_dot_a / speed_sq)[:, None] * X_dot
     a_perp_norm = np.linalg.norm(a_perp, axis=1)
 
     # Unit principal normal (zero where the curve is locally straight).

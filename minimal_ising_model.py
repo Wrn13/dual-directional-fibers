@@ -2,6 +2,7 @@
 import sys
 import itertools as it
 import pickle as pk
+from typing import Callable
 import numpy as np
 import torch as tr
 import matplotlib as mp
@@ -156,7 +157,7 @@ def run_fiber(starting_point, direction, f, Df, get_loss, output_file):
         "v": starting_point,
         "c": direction,
         "terminate": lambda trace: (
-            get_loss(tr.tensor(trace.x[:te].T)) > 1
+            get_loss(tr.tensor(trace.x.T)) > 1
         ).any(),
         "max_step_size": 100,
         "max_traverse_steps": 50000,  # 000,
@@ -195,9 +196,232 @@ def run_fiber(starting_point, direction, f, Df, get_loss, output_file):
     with open(output_file, "wb") as file:
         pk.dump((starting_point, V, A, R), file)
 
+
+def evaluate_loss_gradient_field(
+    f: Callable[[np.ndarray], np.ndarray],
+    x_range: tuple[float, float] = (-0.5, 1.5),
+    y_range: tuple[float, float] = (-0.5, 1.5),
+    n_grid: int = 21,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    r"""Evaluate the loss-gradient vector field :math:`f=\nabla_c L` on a grid.
+
+    The directional fiber is the set :math:`\{c : f(c)=\eta\,\hat c_\mathrm{dir}\}`
+    (Katz & Reggia, IEEE TNNLS 2018), so this field is exactly the object the
+    fiber is threaded through. Evaluation is a single *batched* call: the grid
+    of :math:`n\_grid^2` points is passed as one ``(2, K)`` array, matching the
+    contract of ``f`` produced by ``f_factory`` (in -> ``(2, K)``, out -> ``(2, K)``).
+
+    Parameters
+    ----------
+    f : Callable[[np.ndarray], np.ndarray]
+        Vector field from ``f_factory``. Maps parameter points of shape
+        ``(2, K)`` (row 0 = ``alpha``, row 1 = ``beta``) to the gradient
+        :math:`\nabla L` of shape ``(2, K)``.
+    x_range, y_range : tuple[float, float]
+        Inclusive bounds for the ``alpha`` (x) and ``beta`` (y) axes.
+    n_grid : int
+        Samples per axis; total ``n_grid**2`` field evaluations.
+
+    Returns
+    -------
+    XX, YY : np.ndarray
+        ``meshgrid`` coordinate arrays, shape ``(n_grid, n_grid)``.
+    U, W : np.ndarray
+        Gradient components :math:`\partial L/\partial\alpha` and
+        :math:`\partial L/\partial\beta` on the grid, same shape as ``XX``.
+    """
+    xs = np.linspace(x_range[0], x_range[1], n_grid)
+    ys = np.linspace(y_range[0], y_range[1], n_grid)
+    XX, YY = np.meshgrid(xs, ys)                    # (n_grid, n_grid)
+    pts = np.stack([XX.ravel(), YY.ravel()], axis=0)  # (2, n_grid**2)
+    F = f(pts)                                      # (2, n_grid**2)
+    U = F[0].reshape(XX.shape)
+    W = F[1].reshape(XX.shape)
+    return XX, YY, U, W
+
+def _draw_fiber_vectors(
+    ax,
+    fiber: np.ndarray,
+    f: Callable[[np.ndarray], np.ndarray],
+    color: str,
+    count: int,
+    normalize: bool,
+) -> None:
+    r"""Overlay the field :math:`f(c)` sampled at points along one fiber.
+
+    On the fiber, :math:`f(c)=\eta\,\hat c_\mathrm{dir}`; these arrows therefore
+    lie along :math:`\pm\hat c_\mathrm{dir}`, flipping by :math:`180^\circ` at the
+    sign changes of :math:`\eta` (the transverse zero crossings are the optima).
+
+    Parameters
+    ----------
+    fiber : np.ndarray
+        Fiber trace of shape ``(2, N)`` (row 0 = ``alpha``, row 1 = ``beta``).
+    count : int
+        Target number of arrows; the stride is ``N // count``.
+    normalize : bool
+        If ``True`` draw unit-length arrows (direction only); if ``False`` keep
+        the raw :math:`\eta` magnitudes (shows how :math:`\eta` grows/flips).
+    """
+    C = f(fiber)                                   # (2, N), batched single call
+    n = fiber.shape[1]
+    stride = max(1, n // max(1, count))
+    P = fiber[:, ::stride]
+    Cs = C[:, ::stride]
+    if normalize:
+        mag = np.hypot(Cs[0], Cs[1])
+        safe = np.isfinite(mag) & (mag > 0.0)
+        denom = np.where(mag == 0.0, 1.0, mag)
+        Cs = np.where(safe, Cs / denom, np.nan)
+        ax.quiver(P[0], P[1], Cs[0], Cs[1], color=color,
+                  angles="xy", scale_units="xy", scale=12,
+                  width=0.006, zorder=4, alpha=0.95)
+    else:
+        ax.quiver(P[0], P[1], Cs[0], Cs[1], color=color,
+                  angles="xy", scale=30, width=0.006, zorder=4, alpha=0.95)
+        
+
+def plot_fibers_and_field(
+    V: np.ndarray,
+    V_1: np.ndarray,
+    f: Callable[[np.ndarray], np.ndarray],
+    direction: np.ndarray | None = None,
+    x_range: tuple[float, float] = (-0.5, 1.5),
+    y_range: tuple[float, float] = (-0.5, 1.5),
+    n_grid: int = 21,
+    normalize: bool = True,
+    descent: bool = False,
+    output_path: str | None = None,
+    show_fiber_vectors: bool = True,        # <-- draw f(c) at points along each fiber
+    fiber_vector_count: int = 40,           # <-- approx arrows per fiber (sets the stride)
+    fiber_vector_normalize: bool = True,    # <-- unit-length on-fiber arrows
+) -> None:
+    r"""Plot the two directional fibers over the loss-gradient vector field.
+
+    Parameters
+    ----------
+    V, V_1 : np.ndarray
+        Fiber traces of shape ``(2, N)`` and ``(2, M)`` as stored by
+        ``run_fiber`` (the ``V`` arrays from ``minimal_ising.pkl`` and
+        ``minimal_ising_stitch_1.pkl``). Row 0 = ``alpha``, row 1 = ``beta``.
+    f : Callable[[np.ndarray], np.ndarray]
+        Loss-gradient field; see :func:`evaluate_loss_gradient_field`.
+    dir : np.ndarray
+        Direction of the fiber
+    x_range, y_range : tuple[float, float]
+        Plot window. Fibers extending past these bounds are clipped by the axes.
+    n_grid : int
+        Arrows per axis for the quiver field.
+    normalize : bool
+        If ``True``, draw unit-length arrows (direction only) and encode
+        :math:`\log_{10}\|\nabla L\|` as color. The gradient magnitude spans
+        several decades, so raw-length arrows are unreadable; normalization is
+        the standard remedy for phase-portrait-style plots.
+    descent : bool
+        If ``True``, draw :math:`-\nabla L` (gradient-descent flow, arrows point
+        toward optima) instead of :math:`+\nabla L`.
+    output_path : str | None
+        If given, save to this path; otherwise ``plt.show()``.
+    show_fiber_vectors: bool
+        Draws f(c) for points along the fiber. Default True
+    fiber_vector_count: int
+        The number of arrows per fiber
+    fiber_vector_normalize: bool
+        Makes vectors normalized length
+    """
+    XX, YY, U, W = evaluate_loss_gradient_field(f, x_range, y_range, n_grid)
+    if descent:
+        U, W = -U, -W
+
+    mag = np.hypot(U, W)
+    finite = np.isfinite(mag)
+
+    # Direction-only arrows; mask non-finite (e.g. autograd through eigvalsh at
+    # near-degenerate spectra can return NaN) and the exact zeros at optima.
+    if normalize:
+        safe = finite & (mag > 0)
+        denom = np.where(mag == 0.0, 1.0, mag)
+        U = np.where(safe, U / denom, np.nan)
+        W = np.where(safe, W / denom, np.nan)
+    else:
+        U = np.where(finite, U, np.nan)
+        W = np.where(finite, W, np.nan)
+
+    color = np.log10(np.where(finite, np.hypot(*[c for c in (U, W)]) * 0 + mag, np.nan) + 1e-12)
+
+    fig, ax = plt.subplots(figsize=(7.5, 7.5))
+    q = ax.quiver(
+        XX, YY, U, W, color,
+        cmap="viridis", angles="xy", pivot="mid",
+        scale=30 if normalize else None,
+        width=0.004, alpha=0.9,
+    )
+    fig.colorbar(q, ax=ax, label=r"$\log_{10}\,\|\nabla L\|$", shrink=0.85)
+
+    # The two directional fibers.
+    ax.plot(V[0], V[1], color="black", lw=2.0, zorder=3,
+            label=r"Fiber 1 (seed $(\alpha,\beta)=(0,1)$, Ising)")
+    ax.plot(V_1[0], V_1[1], color="crimson", lw=2.0, zorder=3,
+            label=r"Fiber 2 (seed $(\alpha,\beta)=(1,0)$, KW dual)")
+    
+    if show_fiber_vectors:
+        _draw_fiber_vectors(ax, V,   f, "black",   fiber_vector_count, fiber_vector_normalize)
+        _draw_fiber_vectors(ax, V_1, f, "crimson", fiber_vector_count, fiber_vector_normalize)
+
+    # The isospectral pair: zeros of the field threaded by the fibers.
+    ax.scatter([0.0, 1.0], [1.0, 0.0], s=70, marker="o",
+               facecolors="white", edgecolors="black", linewidths=1.5,
+               zorder=4)
+    ax.annotate("Ising", (0.0, 1.0), textcoords="offset points",
+                xytext=(8, 8), fontsize=11)
+    ax.annotate("KW dual", (1.0, 0.0), textcoords="offset points",
+                xytext=(8, 8), fontsize=11) 
+
+    # Reference arrow for the fixed fiber direction \hat c_dir. The fiber is
+    # gamma = {c : f(c) = eta * c_dir}, so along each fiber the field arrows
+    # must be parallel (eta>0) or antiparallel (eta<0) to this vector.
+    if direction is not None:
+        d = np.asarray(direction, dtype=float).ravel()   # handles (2,1) or (2,)
+        norm = np.linalg.norm(d)
+        if norm == 0.0:
+            raise ValueError("`direction` is the zero vector; cannot normalize.")
+        d = d / norm
+
+        L = 0.3  # arrow length in data units
+
+        direction_anchor = (.5,.5)
+        ax.quiver(
+            direction_anchor[0], direction_anchor[1], d[0] * L, d[1] * L,
+            angles="xy", scale_units="xy", scale=1,
+            color="black", width=0.011, zorder=5,
+        )
+        ax.scatter(*direction_anchor, s=20, color="black", zorder=6)
+        ax.annotate(
+            r"$\hat c_\mathrm{dir}$",
+            np.asarray(direction_anchor) + d * L,
+            textcoords="offset points", xytext=(6, 6),
+            color="black", fontsize=12,
+        )
+
+
+    ax.set_xlim(*x_range)
+    ax.set_ylim(*y_range)
+    ax.set_aspect("equal")
+    ax.set_xlabel(r"$\alpha$")
+    ax.set_ylabel(r"$\beta$")
+    ax.set_title(r"Directional fibers over $\nabla_c L$"
+                 + (r"  ($-\nabla L$ shown)" if descent else ""))
+    ax.legend(loc="upper right", framealpha=0.9)
+    fig.tight_layout()
+
+    if output_path is not None:
+        fig.savefig(output_path, dpi=150)
+    else:
+        plt.show()
+
 def main():
     do_fiber = False
-    do_perturb1 = True
+    do_perturb1 = False
     do_perturb2 = False
 
     # constant direction
@@ -247,12 +471,12 @@ def main():
     top_k_idx = top_k_idx[np.argsort(-kappa[top_k_idx])]
     print(top_k_idx)
 
-    # plt.plot(np.arange(0,len(kappa), 1), kappa)
-    # plt.scatter(top_k_idx, kappa[top_k_idx], color="red")
-    # plt.title("Curvature across fiber")
-    # plt.xlabel("Index")
-    # plt.ylabel("Curvature")
-    # plt.show()
+    plt.plot(np.arange(0,len(kappa), 1), kappa)
+    plt.scatter(top_k_idx, kappa[top_k_idx], color="red")
+    plt.title("Curvature across fiber")
+    plt.xlabel("Index")
+    plt.ylabel("Curvature")
+    plt.show()
 
     # trace_loss = get_loss(tr.tensor(V.T))
     # plt.plot(trace_loss)
@@ -267,12 +491,12 @@ def main():
     # plt.show()
 
     #Peaks at 2902
-    normal_dir = normal[2902, :]
+    normal_dir = normal[7126, :]
     # Restart at around 2902
     if do_perturb1:
-        init_vector = V[:, 2902] - normal_dir
+        init_vector = V[:, 7126] - normal_dir
         init_vector = np.atleast_2d(init_vector).T
-        init_vector = tr.tensor([[1,0]], dtype=tr.complex128).T
+       # init_vector = tr.tensor([[1,0]], dtype=tr.complex128).T
         run_fiber(init_vector, c_dir, f, Df, get_loss, "results/minimal_ising_stitch_1.pkl")
 
     with open("results/minimal_ising_stitch_1.pkl", "rb") as file:
@@ -301,15 +525,15 @@ def main():
 
     #print("Optima: ", R_2.shape)
 
-    plt.subplot(1,2,1)
-    plt.plot(range(2), R)
-    plt.xlabel("Coefficient")
-    plt.ylabel("Value")
+    # plt.subplot(1,2,1)
+    # plt.plot(range(2), R)
+    # plt.xlabel("Coefficient")
+    # plt.ylabel("Value")
 
-    plt.subplot(1,2,2)
-    plt.plot(range(2), R_1)
-    plt.xlabel("Coefficient")
-    plt.ylabel("Value")
+    # plt.subplot(1,2,2)
+    # plt.plot(range(2), R_1)
+    # plt.xlabel("Coefficient")
+    # plt.ylabel("Value")
 
     #plt.subplot(1,3,3)
     #plt.plot(range(5), R_2)
@@ -318,7 +542,9 @@ def main():
     #plt.tight_layout()
     plt.show()
 
-
+    # f is already built above: f = f_factory(get_loss)
+    plot_fibers_and_field(V, V_1, f, c_dir, x_range=(-0.5, 1.5), y_range=(-0.5, 1.5),
+                          n_grid=50, normalize=True)
 
 if __name__ == "__main__":
     mp.rcParams["font.family"] = "serif"
