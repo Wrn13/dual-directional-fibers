@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python \"C:/Users/Warren/AppData/Local/Temp/claude/c--Users-Warren-Desktop-dual-directional-fibers/91bed6aa-fa33-4f4e-a21d-d5c5104742a9/scratchpad/sanity.py\")",
+      "Bash(PYTHONPATH=\"c:/Users/Warren/Desktop/dual-directional-fibers\" python \"C:/Users/Warren/AppData/Local/Temp/claude/c--Users-Warren-Desktop-dual-directional-fibers/91bed6aa-fa33-4f4e-a21d-d5c5104742a9/scratchpad/sanity.py\")",
+      "Bash(MPLBACKEND=Agg python grad_descent.py)"
+    ]
+  }
+}
