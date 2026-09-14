@@ -15,7 +15,6 @@ import numpy as np
 import torch as tr
 import matplotlib as mp
 import matplotlib.pyplot as plt
-from matplotlib.colors import LinearSegmentedColormap
 
 from ising_finder import get_spectrum, get_loss_factory, n_qb
 
@@ -53,15 +52,31 @@ MUTED = "#898781"
 GRID = "#e1e0d9"
 BASELINE = "#c3c2b7"
 
-# Diverging pair for signed coefficients: warm/cool poles, neutral gray midpoint.
-DIVERGING = LinearSegmentedColormap.from_list(
-    "coeff_diverging", ["#2a78d6", "#f0efec", "#e34948"]
-)
+# eigenvalues closer than this count as one degenerate level. Well above the
+# ~1e-8 spread eigvalsh leaves on a converged dual, well below the level
+# spacing of the Ising spectra this searches over.
+DEGEN_TOL = 1e-6
 
 
 def random_inits(n_restarts, scale=1.0):
     """(K, 12) float64 batch of random restarts over the full coefficient space."""
     return tr.tensor(rng.normal(scale=scale, size=(n_restarts, N_PARAMS)))
+
+
+def perturbed_inits(c_center, n_restarts, scale=0.1):
+    """(K, 12) float64 batch of small random perturbations around one point.
+
+    c_center is (1, 12) or (12,). Every restart is c_center plus isotropic
+    Gaussian noise of the given scale, so the restarts probe the neighbourhood
+    of a single point rather than the whole coefficient space.
+    """
+    c_center = tr.as_tensor(c_center, dtype=tr.get_default_dtype()).reshape(1, -1)
+    if c_center.shape[1] != N_PARAMS:
+        raise ValueError(
+            f"c_center has {c_center.shape[1]} coefficients, expected {N_PARAMS}"
+        )
+    noise = tr.tensor(rng.normal(scale=scale, size=(n_restarts, N_PARAMS)))
+    return c_center + noise
 
 
 def run_grad_descent(get_loss, c_init, n_steps=2000, lr=1e-2, tol=1e-8, log_every=100):
@@ -113,52 +128,53 @@ def _style_axes(ax, ygrid=True):
         ax.set_axisbelow(True)
 
 
+def _dual_line_style(i, n_duals):
+    """Per-dual line style: categorical while identity is legible, else one hue.
+
+    Returns kwargs for plotting dual i of n_duals. Mirrors _loss_line_style, so
+    a dual keeps the same hue in both figures while the counts are small.
+    """
+    if n_duals <= MAX_SERIES:
+        return dict(
+            color=SERIES_COLORS[i], marker=SERIES_MARKERS[i],
+            markersize=7, linewidth=1.6,
+            markeredgecolor="white", markeredgewidth=0.8,
+            label=f"dual {i}",
+        )
+    # the individual dual is no longer the unit of interest, the spread is
+    return dict(color=SERIES_COLORS[0], linewidth=0.9, alpha=0.35)
+
+
 def plot_dual_coefficients(C_dual, c_targ, style=None, ax=None):
     """Plot the coefficients of every dual found, against the target.
 
     C_dual is (n_duals, 12) and c_targ is (1, 12) or (12,). `style` picks the
-    form, and by default follows the dual count, since what the reader can
-    actually do with the figure changes with it:
+    form:
 
-      "profile"      - one marker series per dual across the 12 named
-                       operators. Default up to 8 duals; past that the
-                       categorical slots would have to be cycled.
-      "heatmap"      - duals x coefficients grid on a diverging scale. Default
-                       from 9 to 20, where each dual still gets a readable row.
+      "profile"      - one line per dual across the 12 named operators. The
+                       default at any count: up to 8 duals each get their own
+                       categorical hue and marker, past that they keep being
+                       drawn as a single translucent population.
       "distribution" - where every dual's value for each operator lands, as a
-                       jittered strip. Default past 20, where per-dual identity
-                       stops being legible and the population is the point.
+                       jittered strip. Opt in when the population, rather than
+                       any individual dual, is the point.
     """
     c_targ = np.asarray(c_targ).reshape(-1)
     n_duals = C_dual.shape[0]
+    # the live search draws this at one dual, so the singular case is common
+    noun = "dual" if n_duals == 1 else "duals"
 
     if style is None:
-        if n_duals <= MAX_SERIES:
-            style = "profile"
-        elif n_duals <= 20:
-            style = "heatmap"
-        else:
-            style = "distribution"
+        style = "profile"
 
     if ax is None:
-        width = 8.6 if style == "profile" else 6.5
-        height = 3.6
-        if style == "heatmap":
-            # keep rows thick enough to read
-            height = min(3.6 + 0.16 * n_duals, 7.5)
-        _, ax = plt.subplots(figsize=(width, height), layout="constrained")
+        # the profile legend sits outside the axes, so it needs the extra width
+        width = 8.6 if style == "profile" and n_duals <= MAX_SERIES else 6.5
+        _, ax = plt.subplots(figsize=(width, 3.6), layout="constrained")
 
     x = np.arange(N_PARAMS)
 
     if style == "profile":
-        shown = min(n_duals, MAX_SERIES)
-        if n_duals > MAX_SERIES:
-            suggestion = "heatmap" if n_duals <= 20 else "distribution"
-            print(
-                f"note: showing the first {MAX_SERIES} of {n_duals} duals; "
-                f"use style={suggestion!r} for all of them"
-            )
-
         ax.axhline(0, color=BASELINE, linewidth=1, zorder=0)
 
         # target is context, not a series, so it wears ink rather than a hue
@@ -167,72 +183,23 @@ def plot_dual_coefficients(C_dual, c_targ, style=None, ax=None):
             label="target (Ising)",
         )
 
-        for i in range(shown):
-            ax.plot(
-                x, C_dual[i],
-                color=SERIES_COLORS[i], marker=SERIES_MARKERS[i],
-                markersize=7, linewidth=1.6, zorder=3,
-                markeredgecolor="white", markeredgewidth=0.8,
-                label=f"dual {i}",
-            )
+        for i in range(n_duals):
+            ax.plot(x, C_dual[i], zorder=3, **_dual_line_style(i, n_duals))
 
         ax.set_xticks(x)
         ax.set_xticklabels(COEFF_LABELS)
         ax.set_xlim(-0.4, N_PARAMS - 0.6)
         ax.set_ylabel("Coefficient value")
         ax.set_xlabel("Hamiltonian term")
-        title = f"Coefficients of {n_duals} isospectral duals"
-        if shown < n_duals:
-            title = f"Coefficients of {shown} of {n_duals} isospectral duals"
-        ax.set_title(title, color=INK)
+        ax.set_title(f"Coefficients of {n_duals} isospectral {noun}", color=INK)
         # outside the axes: the data range varies run to run, so any in-axes
         # placement eventually lands on top of a series
-        ax.legend(
-            frameon=False, fontsize=8, labelcolor=INK,
-            loc="upper left", bbox_to_anchor=(1.01, 1.0),
-        )
+        if n_duals <= MAX_SERIES:
+            ax.legend(
+                frameon=False, fontsize=8, labelcolor=INK,
+                loc="upper left", bbox_to_anchor=(1.01, 1.0),
+            )
         _style_axes(ax)
-
-    elif style == "heatmap":
-        # target stacked on top so the comparison is immediate
-        grid = np.vstack([c_targ, C_dual])
-        n_rows = grid.shape[0]
-        limit = np.fabs(grid).max()
-
-        # the gap between cells only reads as a gap while the cells are thick
-        # enough to survive it
-        edge = 1.5 if n_rows <= 20 else 0.0
-
-        mesh = ax.pcolormesh(
-            grid, cmap=DIVERGING, vmin=-limit, vmax=limit,
-            edgecolors="white", linewidth=edge,
-        )
-        cbar = plt.colorbar(mesh, ax=ax)
-        cbar.set_label("Coefficient value", color=INK)
-        cbar.outline.set_visible(False)
-        cbar.ax.tick_params(colors=MUTED, labelcolor=INK)
-
-        # separate the reference row from the duals
-        ax.axhline(1, color=INK, linewidth=1.5)
-
-        if n_rows <= 20:
-            yticks = np.arange(n_rows) + 0.5
-            ylabels = ["target"] + [f"dual {i}" for i in range(n_duals)]
-        else:
-            # thin the labels rather than let 100+ of them collide
-            step = int(np.ceil(n_duals / 10))
-            kept = range(0, n_duals, step)
-            yticks = np.array([0] + [1 + i for i in kept]) + 0.5
-            ylabels = ["target"] + [f"dual {i}" for i in kept]
-        ax.set_yticks(yticks)
-        ax.set_yticklabels(ylabels)
-
-        ax.set_xticks(x + 0.5)
-        ax.set_xticklabels(COEFF_LABELS)
-        ax.invert_yaxis()
-        ax.set_xlabel("Hamiltonian term")
-        ax.set_title(f"Coefficients of {n_duals} isospectral duals", color=INK)
-        _style_axes(ax, ygrid=False)
 
     elif style == "distribution":
         # one series (the population of duals), so one hue; the target is the
@@ -257,18 +224,253 @@ def plot_dual_coefficients(C_dual, c_targ, style=None, ax=None):
         ax.set_ylabel("Coefficient value")
         ax.set_xlabel("Hamiltonian term")
         ax.set_title(
-            f"Coefficient spread across {n_duals} isospectral duals", color=INK
+            f"Coefficient spread across {n_duals} isospectral {noun}", color=INK
         )
         ax.legend(frameon=False, fontsize=8, labelcolor=INK, loc="best")
         _style_axes(ax)
 
     else:
         raise ValueError(
-            f"unknown style {style!r}, expected 'profile', 'heatmap' "
-            "or 'distribution'"
+            f"unknown style {style!r}, expected 'profile' or 'distribution'"
         )
 
     return ax
+
+
+def spectrum_degeneracy(spectrum, tol=DEGEN_TOL):
+    """Group one spectrum's eigenvalues into degenerate levels.
+
+    spectrum is (2**n_qb,), sorted or not. Returns (levels, multiplicities):
+    the mean energy of each run of eigenvalues whose neighbours sit within tol,
+    and how many eigenvalues that level holds. Grouping is by neighbouring gap,
+    so a level can be wider than tol if its members chain across it - at the
+    tolerances here that only happens for spectra that are near-degenerate
+    anyway, which is worth seeing as one level.
+    """
+    lam = np.sort(np.asarray(spectrum).reshape(-1))
+    starts = np.flatnonzero(np.diff(lam) > tol) + 1
+    groups = np.split(lam, starts)
+    levels = np.array([g.mean() for g in groups])
+    mult = np.array([g.size for g in groups])
+    return levels, mult
+
+
+def degeneracy_pattern(spectrum, tol=DEGEN_TOL):
+    """Multiplicities as a compact string, e.g. "1-2-2-2-1", low level first."""
+    _, mult = spectrum_degeneracy(spectrum, tol)
+    return "-".join(str(m) for m in mult)
+
+
+def print_degeneracy(spectrum, label="target", tol=DEGEN_TOL, absolute=False):
+    """Print the level table of one spectrum: energy, multiplicity, spread.
+
+    With absolute, the table is over |lambda| instead, where a level of two
+    counts a +/- pair rather than a true degeneracy.
+    """
+    lam = np.sort(np.abs(np.asarray(spectrum).reshape(-1)) if absolute
+                  else np.asarray(spectrum).reshape(-1))
+    levels, mult = spectrum_degeneracy(lam, tol)
+    what = "|spectrum|" if absolute else "spectrum"
+    print(
+        f"{label} {what}: {lam.size} states in {levels.size} levels"
+        f"  [{degeneracy_pattern(lam, tol)}]"
+    )
+    start = 0
+    for lv, m in zip(levels, mult):
+        members = lam[start : start + m]
+        start += m
+        # the width of a supposedly degenerate level is how much to trust it
+        width = "" if m == 1 else f"   (width {np.ptp(members):.2e})"
+        print(f"  {lv:+.9f}  x{m}{width}")
+
+
+def reflection_residual(spectrum):
+    """How far the spectrum is from being symmetric under lambda -> -lambda.
+
+    Sorted ascending, a spectrum with that symmetry satisfies
+    lambda_i = -lambda_{n-1-i}, so this returns the largest violation of that
+    pairing. Zero to numerical precision means every eigenvalue has a partner
+    of equal magnitude and opposite sign, which is exactly the case where the
+    |lambda| view collapses to half as many levels as the signed one.
+    """
+    lam = np.sort(np.asarray(spectrum).reshape(-1))
+    return float(np.abs(lam + lam[::-1]).max())
+
+
+def print_symmetry(spectrum, label="target", tol=DEGEN_TOL):
+    """Report the lambda -> -lambda pairing, then the |lambda| level table."""
+    residual = reflection_residual(spectrum)
+    verdict = "symmetric" if residual <= tol else "NOT symmetric"
+    print(
+        f"{label} spectrum is {verdict} under lambda -> -lambda"
+        f"  (max pairing residual {residual:.2e})"
+    )
+    print_degeneracy(spectrum, label=label, tol=tol, absolute=True)
+
+
+def _fanned_levels(spectrum, x0, tol, width=0.16):
+    """(x, sorted eigenvalues) with each degenerate multiplet spread sideways.
+
+    Coincident eigenvalues draw exactly on top of each other, which is
+    precisely the thing being counted, so members of a level fan out around x0.
+    """
+    lam = np.sort(np.asarray(spectrum).reshape(-1))
+    starts = np.flatnonzero(np.diff(lam) > tol) + 1
+    x = np.empty(lam.size)
+    for g in np.split(np.arange(lam.size), starts):
+        x[g] = x0 if g.size == 1 else x0 + np.linspace(-width, width, g.size)
+    return x, lam
+
+
+def _degeneracy_marker_style(i, n_duals):
+    """Per-dual marker style, matching the hue that dual wears elsewhere."""
+    if n_duals <= MAX_SERIES:
+        return dict(
+            color=SERIES_COLORS[i], marker=SERIES_MARKERS[i], markersize=6,
+            linestyle="none", markeredgecolor="white", markeredgewidth=0.6,
+        )
+    # the individual dual is no longer the unit of interest, the spread is
+    return dict(
+        color=SERIES_COLORS[0], marker="o", markersize=4,
+        linestyle="none", alpha=0.35, markeredgewidth=0,
+    )
+
+
+def plot_spectrum_degeneracy(
+    spec_targ, spec_duals=None, tol=DEGEN_TOL, ax=None, absolute=False
+):
+    """Energy-level view of the target spectrum and every dual's spectrum.
+
+    spec_targ is (2**n_qb,) or (1, 2**n_qb); spec_duals is (n_duals, 2**n_qb)
+    or None for the target alone. The target is drawn as one horizontal line
+    per distinct level, labelled with its multiplicity where that is more than
+    one - an unlabelled line is a singlet, which the title's state and level
+    counts confirm. Each dual gets its own column of eigenvalue markers, with
+    degenerate multiplets fanned out so a doubly occupied level reads as two
+    markers rather than one. Past 8 duals they share a single jittered column.
+
+    With absolute, the same view is drawn over |lambda|. Levels that only
+    appear there are +/- pairs rather than degeneracies: a spectrum symmetric
+    under lambda -> -lambda folds onto half as many levels, all of them even,
+    so the two views side by side separate that symmetry from real degeneracy.
+    """
+    spec_targ = np.asarray(spec_targ).reshape(-1)
+
+    S = (
+        np.empty((0, spec_targ.size))
+        if spec_duals is None
+        else np.asarray(spec_duals).reshape(-1, spec_targ.size)
+    )
+    if absolute:
+        spec_targ = np.abs(spec_targ)
+        S = np.abs(S)
+
+    levels, mult = spectrum_degeneracy(spec_targ, tol)
+    n_duals = S.shape[0]
+    n_cols = n_duals if n_duals <= MAX_SERIES else 1
+
+    if ax is None:
+        # floor keeps the title readable when there is only one dual column
+        _, ax = plt.subplots(
+            figsize=(max(4.6, 3.6 + 0.7 * n_cols), 3.8), layout="constrained"
+        )
+
+    half = 0.42
+    for lv, m in zip(levels, mult):
+        # target is context, not a series, so it wears ink rather than a hue
+        ax.plot([-half, half], [lv, lv], color=INK, linewidth=2, zorder=3)
+        if m > 1:
+            ax.annotate(
+                f"$\\times${m}", xy=(-half - 0.06, lv), ha="right", va="center",
+                fontsize=9, color=INK, zorder=4,
+            )
+
+    x_cols = np.arange(1, n_cols + 1)
+    if n_duals and n_duals <= MAX_SERIES:
+        for i in range(n_duals):
+            x, lam = _fanned_levels(S[i], x_cols[0] + i, tol)
+            ax.plot(x, lam, zorder=2, **_degeneracy_marker_style(i, n_duals))
+        col_labels = [f"dual {i}" for i in range(n_duals)]
+    elif n_duals:
+        # own generator: cosmetic jitter must not advance the search's stream
+        jitter = np.random.default_rng(0).uniform(-0.3, 0.3, size=S.shape)
+        ax.plot(
+            (1 + jitter).ravel(), S.ravel(), zorder=2,
+            **_degeneracy_marker_style(0, n_duals),
+        )
+        col_labels = [f"{n_duals} duals"]
+    else:
+        col_labels = []
+
+    ax.set_xticks([0, *x_cols])
+    ax.set_xticklabels(["target", *col_labels])
+    ax.set_xlim(-1.15, n_cols + 0.6)
+    ax.set_ylabel("$|\\lambda_i|$" if absolute else "Eigenvalue $\\lambda_i$")
+    ax.set_xlabel(f"levels grouped within {tol:g}")
+    # the multiplicity labels already carry the pattern; the title only has to
+    # say how many states collapsed into how few levels
+    ax.set_title(
+        f"{'Magnitude' if absolute else 'Spectrum'} degeneracy: "
+        f"{spec_targ.size} states in {levels.size} levels",
+        color=INK, fontsize=11,
+    )
+    _style_axes(ax)
+    return ax
+
+
+def plot_spectrum_views(spec_targ, spec_duals=None, tol=DEGEN_TOL, axes=None):
+    """The signed and absolute degeneracy views side by side.
+
+    Reading them together is what separates the two ways levels can coincide:
+    degeneracy proper shows up in both panels, while a level that only appears
+    in |lambda| is a +/- pair, i.e. the spectrum's symmetry under
+    lambda -> -lambda. Returns the two axes.
+    """
+    if axes is None:
+        n_duals = 0 if spec_duals is None else np.asarray(spec_duals).reshape(
+            -1, np.asarray(spec_targ).size
+        ).shape[0]
+        n_cols = n_duals if n_duals <= MAX_SERIES else 1
+        width = max(4.6, 3.6 + 0.7 * n_cols)
+        _, axes = plt.subplots(
+            1, 2, figsize=(2 * width, 3.8), layout="constrained"
+        )
+
+    plot_spectrum_degeneracy(spec_targ, spec_duals, tol=tol, ax=axes[0])
+    plot_spectrum_degeneracy(
+        spec_targ, spec_duals, tol=tol, ax=axes[1], absolute=True
+    )
+    return axes
+
+
+def _setup_loss_axes(ax, n_steps):
+    """Chrome shared by the finished-history and step-through loss figures."""
+    ax.set_yscale("log")
+    ax.set_xlabel("Step")
+    ax.set_ylabel("$||\\Lambda - \\Lambda_0||^2$")
+    ax.set_xlim(0, n_steps - 1)
+    _style_axes(ax)
+
+
+def _loss_line_style(k, n_restarts):
+    """Per-restart line style: categorical while identity is legible, else one hue.
+
+    Returns kwargs for plotting restart k of n_restarts.
+    """
+    if n_restarts <= MAX_SERIES:
+        return dict(
+            color=SERIES_COLORS[k], linewidth=2, label=f"restart {k}",
+        )
+    # the individual restart is no longer the unit of interest, the spread is
+    return dict(color=SERIES_COLORS[0], linewidth=0.8, alpha=0.12)
+
+
+def _loss_legend(ax, n_restarts):
+    if n_restarts <= MAX_SERIES:
+        ax.legend(
+            frameon=False, fontsize=8, labelcolor=INK,
+            loc="upper left", bbox_to_anchor=(1.01, 1.0),
+        )
 
 
 def plot_loss_history(loss_history, ax=None):
@@ -283,54 +485,203 @@ def plot_loss_history(loss_history, ax=None):
     if ax is None:
         _, ax = plt.subplots(figsize=(6.0, 3.6), layout="constrained")
 
-    if n_restarts <= MAX_SERIES:
-        for k in range(n_restarts):
-            ax.semilogy(
-                loss_history[:, k], color=SERIES_COLORS[k], linewidth=2,
-                label=f"restart {k}",
-            )
-        ax.legend(
-            frameon=False, fontsize=8, labelcolor=INK,
-            loc="upper left", bbox_to_anchor=(1.01, 1.0),
-        )
-    else:
-        # one hue, thin and translucent: the individual restart is no longer
-        # the unit of interest, the spread of trajectories is
-        ax.semilogy(
-            loss_history, color=SERIES_COLORS[0], linewidth=0.8, alpha=0.12,
-        )
+    for k in range(n_restarts):
+        ax.plot(loss_history[:, k], **_loss_line_style(k, n_restarts))
+    _loss_legend(ax, n_restarts)
 
     ax.set_title(f"Loss per restart over {n_restarts} restarts", color=INK)
-    ax.set_xlabel("Step")
-    ax.set_ylabel("$||\\Lambda - \\Lambda_0||^2$")
-    ax.set_xlim(0, n_steps - 1)
-    _style_axes(ax)
+    _setup_loss_axes(ax, n_steps)
     return ax
+
+
+def run_grad_descent_sequential(
+    get_loss, c_init, n_steps=2000, lr=1e-2, tol=1e-8, log_every=100,
+    c_targ=None, ax=None, deg_tol=DEGEN_TOL,
+):
+    """Descend one restart at a time, adding each finished curve to a live figure.
+
+    Each restart runs to completion through run_grad_descent on a batch of one,
+    then its loss curve is drawn and the run blocks for a keypress or click
+    before the next restart starts. Returns the same three values with the same
+    shapes as run_grad_descent, so callers and the saved artifact are unaffected.
+
+    Pass c_targ to also get two more live figures: the duals' coefficients, and
+    the degeneracy of their spectra against the target's, in both the signed
+    and the |lambda| view. Both grow whenever a restart lands below tol. The
+    degeneracy figure opens on the target alone, before the first restart,
+    since its level structure is what the duals are being read against;
+    deg_tol sets how close eigenvalues must sit to count as one level.
+    """
+    n_restarts = c_init.shape[0]
+
+    # no event loop under a headless backend, so blocking there would hang
+    interactive = not mp.get_backend().lower().startswith("agg")
+    if interactive:
+        plt.ion()
+
+    if ax is None:
+        _, ax = plt.subplots(figsize=(6.0, 3.6), layout="constrained")
+    _setup_loss_axes(ax, n_steps)
+
+    c_best = tr.empty_like(c_init)
+    loss_best = tr.empty(n_restarts)
+    loss_history = np.empty((n_steps, n_restarts))
+
+    duals = []
+    coeff_ax = None
+
+    dual_spectra = []
+    deg_axes = None
+    spec_targ = None
+    if c_targ is not None:
+        spec_targ = get_spectrum(
+            tr.as_tensor(np.asarray(c_targ), dtype=tr.get_default_dtype())
+            .reshape(1, -1)
+        )[0].numpy()
+        # sized for every dual this run could add, since the figure is reused
+        # (cleared and redrawn) rather than remade as the columns arrive
+        deg_width = max(4.6, 3.6 + 0.7 * min(n_restarts, MAX_SERIES))
+        _, deg_axes = plt.subplots(
+            1, 2, figsize=(2 * deg_width, 3.8), layout="constrained"
+        )
+        plot_spectrum_views(spec_targ, tol=deg_tol, axes=deg_axes)
+
+    for k in range(n_restarts):
+        print(f"\n--- restart {k}/{n_restarts} ---")
+        c_k, loss_k, history_k = run_grad_descent(
+            get_loss, c_init[k : k + 1],
+            n_steps=n_steps, lr=lr, tol=tol, log_every=log_every,
+        )
+
+        c_best[k] = c_k[0]
+        loss_best[k] = loss_k[0]
+        loss_history[:, k] = history_k[:, 0]
+
+        ax.plot(loss_history[:, k], **_loss_line_style(k, n_restarts))
+        _loss_legend(ax, n_restarts)
+        # converged curves reach ~1e-29, so the y range has to grow with them
+        ax.relim()
+        ax.autoscale_view()
+
+        if loss_best[k].item() < tol:
+            duals.append(c_best[k].numpy().copy())
+            print(f"  dual {len(duals) - 1}: {duals[-1]}")
+
+            if c_targ is not None:
+                if coeff_ax is None:
+                    _, coeff_ax = plt.subplots(
+                        figsize=(8.6, 3.6), layout="constrained"
+                    )
+                # redraw every dual rather than append one line: the styling
+                # switches from per-dual hues to a single population once the
+                # count passes MAX_SERIES, which the earlier lines share in
+                coeff_ax.clear()
+                plot_dual_coefficients(np.array(duals), c_targ, ax=coeff_ax)
+
+                spec_k = get_spectrum(c_best[k : k + 1])[0].numpy()
+                dual_spectra.append(spec_k)
+                # same reason as the coefficient figure: the styling switches
+                # from per-dual hues to one population past MAX_SERIES
+                for deg_ax in deg_axes:
+                    deg_ax.clear()
+                plot_spectrum_views(
+                    spec_targ, np.array(dual_spectra), tol=deg_tol, axes=deg_axes
+                )
+
+                # isospectral points must share the target's levels; a mismatch
+                # means the dual is still short of converged, or two levels sit
+                # closer together than deg_tol can tell apart
+                for what, spec_pair in (
+                    ("degeneracy", (spec_k, spec_targ)),
+                    ("|degeneracy|", (np.abs(spec_k), np.abs(spec_targ))),
+                ):
+                    pattern, targ_pattern = (
+                        degeneracy_pattern(s, deg_tol) for s in spec_pair
+                    )
+                    agrees = "matches target" if pattern == targ_pattern else (
+                        f"DIFFERS from target {targ_pattern}"
+                    )
+                    print(f"  {what} {pattern} ({agrees})")
+                print(
+                    f"  reflection residual {reflection_residual(spec_k):.2e}"
+                    f" (target {reflection_residual(spec_targ):.2e})"
+                )
+
+        last = k == n_restarts - 1
+        hint = "" if last else " - press any key for the next"
+        ax.set_title(f"restart {k + 1}/{n_restarts} done{hint}", color=INK)
+
+        if interactive:
+            figs = [ax.figure]
+            if coeff_ax is not None:
+                figs.append(coeff_ax.figure)
+            if deg_axes is not None:
+                figs.append(deg_axes[0].figure)
+            for fig in figs:
+                fig.canvas.draw_idle()
+            plt.pause(0.001)
+            if not last:
+                plt.waitforbuttonpress()
+
+    ax.set_title(f"Loss per restart over {n_restarts} restarts", color=INK)
+    if interactive:
+        plt.ioff()
+
+    return c_best, loss_best, loss_history
 
 
 def main():
     do_search = True
+    # one restart at a time, adding each curve as it finishes
+    step_through = True
 
-    n_restarts = 4
+    n_restarts = 12
     n_steps = 2000
-    tol = 1e-8
-    # n_qb is part of the key: the spectrum, and so every stored loss, is only
-    # meaningful for the chain length the search ran at
-    output_file = f"results/grad_descent_n{n_qb}_seed{seed}.pkl"
+    tol = 1e-12
+    # how close two eigenvalues must sit to be read as one degenerate level
+    deg_tol = DEGEN_TOL
+    # width of the restart cloud around c_center; set c_center = None to go back
+    # to restarts drawn over the whole coefficient space
+    perturb_scale = 0.1
 
     h = 1.5
     J = 1
     c_targ = tr.tensor([[0, 0, h, J, 0, 0, 0, 0, h, -J, 0, 0]])
 
+    # point the restarts cluster around; the target itself asks which duals sit
+    # near it, and is a fixed point of the loss, so expect restarts that fall
+    # straight back to it alongside any genuinely distinct duals
+    c_center = c_targ
+
+    # n_qb is part of the key: the spectrum, and so every stored loss, is only
+    # meaningful for the chain length the search ran at. The restart cloud is
+    # too, so a local run does not overwrite a global one.
+    local = "" if c_center is None else f"_local{perturb_scale:g}"
+    output_file = f"results/grad_descent_n{n_qb}_seed{seed}{local}.pkl"
+
     get_loss = get_loss_factory(c_targ)
 
+    # the level structure every dual has to reproduce, printed before the
+    # search so the duals arriving below can be read against it
+    print_degeneracy(get_spectrum(c_targ)[0].numpy(), label="target", tol=deg_tol)
+    print_symmetry(get_spectrum(c_targ)[0].numpy(), label="target", tol=deg_tol)
+
     if do_search:
-        C_init = random_inits(n_restarts)
+        if c_center is None:
+            C_init = random_inits(n_restarts)
+        else:
+            C_init = perturbed_inits(c_center, n_restarts, scale=perturb_scale)
         print(f"initial loss: min {get_loss(C_init).min().item():.3e}")
 
-        C_final, losses, loss_history = run_grad_descent(
-            get_loss, C_init, n_steps=n_steps, tol=tol
-        )
+        if step_through:
+            C_final, losses, loss_history = run_grad_descent_sequential(
+                get_loss, C_init, n_steps=n_steps, tol=tol,
+                c_targ=c_targ.numpy(), deg_tol=deg_tol,
+            )
+        else:
+            C_final, losses, loss_history = run_grad_descent(
+                get_loss, C_init, n_steps=n_steps, tol=tol
+            )
 
         with open(output_file, "wb") as file:
             pk.dump(
@@ -362,6 +713,9 @@ def main():
             "Re-run with do_search = True."
         )
 
+    # the step-through run already built both figures as the restarts landed
+    drew_live = do_search and step_through
+
     # keep the isospectral points
     keep = losses < tol
     C_dual = C_final[keep]
@@ -372,18 +726,40 @@ def main():
         print(C_dual)
 
         # confirm the spectra really do match, per point
-        spec_err = (
-            (get_spectrum(tr.tensor(C_dual)) - get_spectrum(c_targ))
-            .abs()
-            .max(dim=1)
-            .values.numpy()
-        )
+        spec_targ = get_spectrum(c_targ)
+        spec_dual = get_spectrum(tr.tensor(C_dual))
+        spec_err = (spec_dual - spec_targ).abs().max(dim=1).values.numpy()
         print("max spectrum deviation per point:")
         print(spec_err)
 
-        plot_dual_coefficients(C_dual, c_targ.numpy())
+        spec_targ = spec_targ[0].numpy()
+        spec_dual = spec_dual.numpy()
 
-    plot_loss_history(loss_history)
+        targ_pattern = degeneracy_pattern(spec_targ, deg_tol)
+        targ_abs_pattern = degeneracy_pattern(np.abs(spec_targ), deg_tol)
+        print(
+            f"degeneracy per point (target {targ_pattern}, "
+            f"|target| {targ_abs_pattern}):"
+        )
+        for i, spec in enumerate(spec_dual):
+            pattern = degeneracy_pattern(spec, deg_tol)
+            abs_pattern = degeneracy_pattern(np.abs(spec), deg_tol)
+            flag = (
+                ""
+                if (pattern, abs_pattern) == (targ_pattern, targ_abs_pattern)
+                else "   <- differs from target"
+            )
+            print(
+                f"  dual {i}: {pattern}   |.| {abs_pattern}"
+                f"   reflection {reflection_residual(spec):.2e}{flag}"
+            )
+
+        if not drew_live:
+            plot_dual_coefficients(C_dual, c_targ.numpy())
+            plot_spectrum_views(spec_targ, spec_dual, tol=deg_tol)
+
+    if not drew_live:
+        plot_loss_history(loss_history)
     plt.show()
 
 

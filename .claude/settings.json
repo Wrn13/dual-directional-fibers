@@ -3,7 +3,14 @@
     "allow": [
       "Bash(python \"C:/Users/Warren/AppData/Local/Temp/claude/c--Users-Warren-Desktop-dual-directional-fibers/91bed6aa-fa33-4f4e-a21d-d5c5104742a9/scratchpad/sanity.py\")",
       "Bash(PYTHONPATH=\"c:/Users/Warren/Desktop/dual-directional-fibers\" python \"C:/Users/Warren/AppData/Local/Temp/claude/c--Users-Warren-Desktop-dual-directional-fibers/91bed6aa-fa33-4f4e-a21d-d5c5104742a9/scratchpad/sanity.py\")",
-      "Bash(MPLBACKEND=Agg python grad_descent.py)"
+      "Bash(MPLBACKEND=Agg python grad_descent.py)",
+      "Bash(MPLBACKEND=Agg python -c ' *)",
+      "PowerShell($env:MPLBACKEND='Agg'; python \"C:\\\\Users\\\\Warren\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-Warren-Desktop-dual-directional-fibers\\\\c17c70b3-9ede-4f9e-8a16-927c79d499d9\\\\scratchpad\\\\smoke.py\")",
+      "PowerShell($env:MPLBACKEND='Agg'; $env:PYTHONPATH='c:\\\\Users\\\\Warren\\\\Desktop\\\\dual-directional-fibers'; python \"C:\\\\Users\\\\Warren\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-Warren-Desktop-dual-directional-fibers\\\\c17c70b3-9ede-4f9e-8a16-927c79d499d9\\\\scratchpad\\\\smoke.py\")",
+      "PowerShell($env:MPLBACKEND='Agg'; $env:PYTHONPATH='c:\\\\Users\\\\Warren\\\\Desktop\\\\dual-directional-fibers'; python \"C:\\\\Users\\\\Warren\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-Warren-Desktop-dual-directional-fibers\\\\c17c70b3-9ede-4f9e-8a16-927c79d499d9\\\\scratchpad\\\\smoke_plot.py\")",
+      "PowerShell($env:PYTHONPATH='c:\\\\Users\\\\Warren\\\\Desktop\\\\dual-directional-fibers'; python -m py_compile \"c:\\\\Users\\\\Warren\\\\Desktop\\\\dual-directional-fibers\\\\grad_descent.py\"; if \\($?\\) { Write-Output \"compiles\" })",
+      "Bash(MPLBACKEND=Agg .venv/Scripts/python.exe -c ' *)",
+      "Bash(.venv/Scripts/python.exe -m py_compile grad_descent.py)"
     ]
   }
 }
