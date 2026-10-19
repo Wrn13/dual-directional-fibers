@@ -1,18 +1,8 @@
 """Newton-Raphson search for dual tensor product structures.
 
-The same search as grad_descent.py - restarts over the 12-dimensional Ising
-coefficient space, looking for points that are isospectral with a target
-Hamiltonian - stepped with Newton-Raphson instead of Adam. Everything around
-the optimizer (the live figures, the degeneracy read-out, the Hessian
-read-out, the saved artifact) is imported from grad_descent, so the two
-scripts differ only in how a restart moves.
-
-Newton-Raphson here is the root finder applied to the stationarity condition
-grad L = 0: solve H dc = -grad L and step. H is the loss Hessian, which is
-singular at any solution - the duals come in continuous families, and the
-loss stops curving along them - so the step comes from a least-squares solve
-rather than an inverse. That picks the minimum-norm step and leaves the flat
-subspace where it is, instead of throwing the iterate to infinity along it.
+The search of grad_descent.py (restarts over the 12 Ising coefficients, looking
+for points isospectral with a target) stepped with Newton-Raphson instead of
+Adam; everything else is imported from grad_descent.
 
 Coefficient layout is [XX, YY, ZZ, X, Y, Z, X_1, Y_1, Z_1, X_N, Y_N, Z_N].
 """
@@ -33,12 +23,16 @@ from grad_descent import (
     MAX_SERIES,
     N_PARAMS,
     degeneracy_pattern,
+    hessian_rank,
     jacobian_rank,
     log_hessian,
+    log_ranks,
     perturbed_inits,
     plot_dual_coefficients,
     plot_dual_ranks,
     plot_loss_history,
+    plot_null_space_comparison,
+    plot_rank_map,
     plot_spectrum_views,
     print_degeneracy,
     print_hessian,
@@ -53,21 +47,19 @@ np.set_printoptions(linewidth=10000000, threshold=1000000)
 tr.set_printoptions(linewidth=1000)
 tr.set_default_dtype(tr.float64)
 
-# singular values below this fraction of the largest are treated as zero when
-# the Newton system is solved. The Hessian is exactly rank deficient at a dual,
-# so this is what keeps the step finite there rather than an accident of
-# conditioning.
+# relative singular-value cutoff for the Newton solve; the Hessian is exactly
+# rank deficient at a dual, and this keeps the step finite there
 NEWTON_RCOND = 1e-10
 
 
 def newton_direction(H, g, rcond=NEWTON_RCOND, damping=0.0):
-    """Minimum-norm solution dc of (H + damping I) dc = -g.
+    """Minimum-norm solution dc of (H + damping I) dc = -g, H (12, 12), g (12,).
 
-    H is (12, 12) and g is (12,), both numpy. Least squares rather than solve:
-    H is singular wherever the loss has flat directions, and lstsq drops those
-    directions from the step instead of dividing by their zero curvature.
+    Least squares, not solve: H is singular along the dual families, and lstsq
+    drops those flat directions instead of dividing by their zero curvature.
     """
-    A = 0.5 * (np.asarray(H) + np.asarray(H).T)
+    A = np.asarray(H)
+    A = 0.5 * (A + A.T)
     if damping:
         A = A + damping * np.eye(A.shape[0])
     dc, *_ = np.linalg.lstsq(A, -np.asarray(g), rcond=rcond)
@@ -77,15 +69,11 @@ def newton_direction(H, g, rcond=NEWTON_RCOND, damping=0.0):
 def newton_iterate(
     get_loss, c, rcond=NEWTON_RCOND, damping=0.0, step_scale=1.0, backtrack=0
 ):
-    """One Newton-Raphson step from a single point c (12,).
+    """One Newton step from c (12,); returns (c_next, loss_here, alpha).
 
-    Returns (c_next, loss_here, alpha), where alpha is the fraction of the
-    Newton step actually taken. With backtrack = 0 that is always step_scale,
-    the plain iteration; with backtrack = m the step is halved up to m times
-    while it would raise the loss, which keeps a restart from being thrown
-    across the space by the indefinite Hessian that sits between the basins.
-    alpha comes back 0 where no tried step improved on where it stands, and
-    nan where the derivatives were not finite.
+    With backtrack = m the step is halved up to m times while it raises the
+    loss. alpha is 0 if no tried step improved, nan if derivatives were not
+    finite.
     """
 
     def loss_one(u):
@@ -111,35 +99,23 @@ def newton_iterate(
         if not backtrack or (np.isfinite(loss_next) and loss_next < loss_here):
             return c_next, loss_here, alpha
         alpha /= 2
-
     return v, loss_here, 0.0
 
 
 def run_newton(
     get_loss, c_init, n_steps=60, tol=1e-8, log_every=5,
     rcond=NEWTON_RCOND, damping=0.0, step_scale=1.0, backtrack=0,
-    hess_every=None, hess_index=0, hess_log=None,
+    hess_every=None, hess_index=0, hess_log=None, rank_every=None,
+    rank_log=None,
 ):
-    """Newton-Raphson every restart, one row at a time per step.
+    """Newton-Raphson every restart; drop-in run_restart for grad_descent.
 
-    Signature and return values match run_grad_descent, so this drops straight
-    into run_grad_descent_sequential as its run_restart: c_init is (K, 12) and
-    it returns (c_best, loss_best, loss_history) with loss_history (n_steps, K).
-
-    Rows are stepped in a loop rather than as a batch because each one needs
-    its own 12x12 Hessian factorization; at these sizes that costs a few
-    spectrum evaluations per row per step. A row that reaches tol, or whose
-    derivatives stop being finite, or that cannot improve on where it stands,
-    is frozen and its loss carried forward through the rest of the history, so
-    the curves stay the same shape as the gradient-descent ones.
-
-    With hess_every set, the Hessian eigenvalues and numerical rank of restart
-    hess_index are printed every hess_every steps and again at the point that
-    restart finished on. Pass a list as hess_log to also collect those samples
-    as (step, rank, eigenvalues, tol), which is what plot_hessian_log draws
-    under the loss. Each is taken at the point the step starts from, the same
-    point loss_history[step] is, so the Hessian at step t is the one the step
-    from t was taken with.
+    c_init is (K, 12); returns (c_best, loss_best, loss_history (n_steps, K)).
+    Restarts that converge or stall are frozen with their loss carried forward.
+    hess_every / hess_log sample restart hess_index's Hessian, rank_every /
+    rank_log every active restart's Hessian rank. Both are sampled before the
+    step, at the point loss_history[step] describes, so the Hessian at step t
+    is the one the step from t was taken with.
     """
     c = c_init.clone().detach()
     n_restarts = c.shape[0]
@@ -150,7 +126,9 @@ def run_newton(
     done = np.zeros(n_restarts, dtype=bool)
 
     for step in range(n_steps):
-        # a frozen restart is not stepping, so there is no step to read against
+        if rank_every and step % rank_every == 0:
+            log_ranks(rank_log, step, get_loss, c, ~done)
+
         if (hess_every and not done[hess_index]
                 and (step % hess_every == 0 or step == n_steps - 1)):
             log_hessian(hess_log, step, print_hessian(
@@ -161,7 +139,6 @@ def run_newton(
 
         for k in range(n_restarts):
             if done[k]:
-                # frozen: carry its last loss forward so the curve stays flat
                 loss_history[step, k] = loss_best[k].item()
                 continue
 
@@ -170,7 +147,6 @@ def run_newton(
                 step_scale=step_scale, backtrack=backtrack,
             )
             loss_history[step, k] = loss_k
-
             if loss_k < loss_best[k].item():
                 loss_best[k] = loss_k
                 c_best[k] = c[k]
@@ -194,8 +170,6 @@ def run_newton(
             )
 
         if done.all():
-            # nothing left to move: hold the final losses for the rest of the
-            # history so the saved array keeps its (n_steps, K) shape
             loss_history[step + 1 :] = loss_history[step]
             print(f"all restarts settled after {step + 1} steps")
             break
@@ -209,27 +183,16 @@ def run_newton(
     return c_best, loss_best, loss_history
 
 
-def dual_report(
-    label, C_dual, c_targ, get_loss, deg_tol, draw_spectrum=True, loss_tol=None
-):
-    """Print and draw the spectrum and the rank read-out for one group's duals.
+def dual_report(label, C_dual, c_targ, get_loss, deg_tol):
+    """Print spectrum, degeneracy, duality and rank read-outs for one group.
 
-    Every dual gets its spectrum checked against the target's - deviation,
-    degeneracy pattern, reflection residual - and its rank measured two ways:
-    from the loss Hessian, and from the spectrum Jacobian. The Hessian is
-    2 J^T J at a zero-residual point, but its rank cut is far looser on the
-    singular values of J, so where they disagree the Jacobian is the one to
-    believe.
-
-    draw_spectrum is off when a step-through run already built the spectrum
-    and coefficient figures live; the rank figure is drawn either way, being
-    the one thing the live run does not show. loss_tol is the cut C_dual was
-    kept under, for the figure titles.
+    Ranks come from both the loss Hessian and the spectrum Jacobian; where they
+    disagree trust the Jacobian (the Hessian's rank cut is far looser). Returns
+    the data main's figures need, or None when C_dual is empty.
     """
-    n_duals = C_dual.shape[0]
-    print(f"\n{label}: {n_duals} isospectral points")
-    if n_duals == 0:
-        return
+    print(f"\n{label}: {C_dual.shape[0]} isospectral points")
+    if C_dual.shape[0] == 0:
+        return None
 
     print("coefficients:")
     print(C_dual)
@@ -238,40 +201,35 @@ def dual_report(
     spec_dual_t = get_spectrum(tr.tensor(C_dual))
     print("max spectrum deviation per point:")
     print((spec_dual_t - spec_targ_t).abs().max(dim=1).values.numpy())
-
     spec_targ = spec_targ_t[0].numpy()
     spec_dual = spec_dual_t.numpy()
 
-    targ_pattern = degeneracy_pattern(spec_targ, deg_tol)
-    targ_abs_pattern = degeneracy_pattern(np.abs(spec_targ), deg_tol)
+    def patterns(spec):
+        return (degeneracy_pattern(spec, deg_tol),
+                degeneracy_pattern(np.abs(spec), deg_tol))
+
+    targ_patterns = patterns(spec_targ)
     print(
-        f"degeneracy per point (target {targ_pattern}, "
-        f"|target| {targ_abs_pattern}):"
+        f"degeneracy per point (target {targ_patterns[0]}, "
+        f"|target| {targ_patterns[1]}):"
     )
     for i, spec in enumerate(spec_dual):
-        pattern = degeneracy_pattern(spec, deg_tol)
-        abs_pattern = degeneracy_pattern(np.abs(spec), deg_tol)
-        flag = (
-            ""
-            if (pattern, abs_pattern) == (targ_pattern, targ_abs_pattern)
-            else "   <- differs from target"
-        )
+        pats = patterns(spec)
+        flag = "" if pats == targ_patterns else "   <- differs from target"
         print(
-            f"  dual {i}: {pattern}   |.| {abs_pattern}"
+            f"  dual {i}: {pats[0]}   |.| {pats[1]}"
             f"   reflection {reflection_residual(spec):.2e}{flag}"
         )
 
     # zero loss is only isospectrality; this rules out the trivial maps
     print_duality(C_dual, c_targ.numpy())
 
-    # the nullity counts the directions the loss does not curve along, which
-    # are the directions a fiber of duals through that point can run
     print("rank at each dual:")
     ranks_h, ranks_j, notes = [], [], []
     for i, c_dual in enumerate(C_dual):
         report = print_hessian(get_loss, c_dual, label=f"  dual {i}: ")
         rank_h = None if report is None else report[1]
-        rank_j, sv = jacobian_rank(c_dual)
+        rank_j, _ = jacobian_rank(c_dual)
         if rank_j is None:
             note_j = "degenerate spectrum, Jacobian undefined"
         else:
@@ -288,36 +246,29 @@ def dual_report(
             + ("n/a" if rank_j is None else str(rank_j))
         )
 
-    plot_dual_ranks(ranks_h, ranks_j, label=label, loss_tol=loss_tol)
-    if draw_spectrum:
-        # the per-column notes only fit while the duals still have their own
-        # columns; past that the spectrum figure is one merged population
-        plot_spectrum_views(
-            spec_targ, spec_dual, tol=deg_tol,
-            col_notes=notes if n_duals <= MAX_SERIES else None,
-        )
-        ax = plot_dual_coefficients(C_dual, c_targ.numpy(), loss_tol=loss_tol)
-        ax.set_title(f"{label}: {ax.get_title()}", color=INK, fontsize=10)
+    return dict(
+        spec_targ=spec_targ, spec_dual=spec_dual,
+        ranks_h=ranks_h, ranks_j=ranks_j, notes=notes,
+    )
 
 
 def search_group(
     label, tag, C_init, get_loss, c_targ, run_restart, do_search=True,
     step_through=False, n_steps=60, log_every=5, tol=1e-12, deg_tol=DEGEN_TOL,
-    hess_every=10, hess_restart=0,
+    hess_every=10, hess_restart=0, rank_every=None,
 ):
-    """Run one group of restarts end to end and report what it found.
+    """Run (or reload, via results/newton_*_{tag}.pkl) one group and report it.
 
-    tag names the group's own artifact, so a random-restart run and a
-    neighbourhood run do not overwrite each other.
+    Draws nothing except a step-through run's live figures. Returns a dict of
+    everything main's figures read; hess_log and rank_log are only filled by a
+    batch search, not by step-through or a reload.
     """
     output_file = f"results/newton_n{n_qb}_seed{seed}_{tag}.pkl"
     print("\n" + "=" * 72)
     print(f"{label}  ->  {output_file}")
     print("=" * 72)
 
-    # the step-through run fills and draws its own; this one is for the batch
-    # path, and stays empty on a reload since it is not part of the artifact
-    hess_log = []
+    hess_log, rank_log = [], []
 
     if do_search:
         print(f"initial loss: min {get_loss(C_init).min().item():.3e}")
@@ -332,24 +283,14 @@ def search_group(
             C_final, losses, loss_history = run_restart(
                 get_loss, C_init, n_steps=n_steps, tol=tol, log_every=log_every,
                 hess_every=hess_every, hess_index=hess_restart,
-                hess_log=hess_log,
+                hess_log=hess_log, rank_every=rank_every, rank_log=rank_log,
             )
-
         with open(output_file, "wb") as file:
-            pk.dump(
-                (
-                    n_qb,
-                    c_targ,
-                    C_init.numpy(),
-                    C_final.numpy(),
-                    losses.numpy(),
-                    loss_history,
-                ),
-                file,
-            )
+            pk.dump((n_qb, c_targ, C_init.numpy(), C_final.numpy(),
+                     losses.numpy(), loss_history), file)
 
     with open(output_file, "rb") as file:
-        (n_qb_saved, c_targ, C_init, C_final, losses, loss_history) = pk.load(file)
+        n_qb_saved, c_targ, C_init, C_final, losses, loss_history = pk.load(file)
 
     if n_qb_saved != n_qb:
         raise ValueError(
@@ -357,7 +298,6 @@ def search_group(
             f"is now n_qb={n_qb}; the stored losses do not describe this "
             "Hamiltonian. Re-run with do_search = True."
         )
-
     if loss_history.shape[1] != losses.shape[0]:
         raise ValueError(
             f"{output_file} holds a {loss_history.shape} loss history for "
@@ -365,58 +305,53 @@ def search_group(
             "Re-run with do_search = True."
         )
 
-    # the step-through run already built both figures as the restarts landed
-    drew_live = do_search and step_through
-
     keep = losses < tol
     print(f"\n{keep.sum()}/{len(losses)} restarts reached loss < {tol:.0e}")
-    dual_report(
-        label, C_final[keep], c_targ, get_loss, deg_tol,
-        draw_spectrum=not drew_live, loss_tol=tol,
+    report = dual_report(label, C_final[keep], c_targ, get_loss, deg_tol)
+
+    # rank at each restart's best point, closing its rank-map row
+    final_ranks = (
+        np.array([hessian_rank(get_loss, c) for c in C_final]) if rank_log
+        else None
     )
 
-    if not drew_live:
-        ax = plot_loss_history(loss_history, hess_log, hess_restart)
-        ax.set_title(f"{label}: {ax.get_title()}", color=INK)
-
-    return C_final[keep]
+    return dict(
+        label=label, c_targ=c_targ, C_dual=C_final[keep], losses=losses,
+        loss_history=loss_history, hess_log=hess_log,
+        hess_restart=hess_restart, rank_log=rank_log, final_ranks=final_ranks,
+        report=report, drew_live=do_search and step_through, tol=tol,
+        deg_tol=deg_tol,
+    )
 
 
 def main():
-    do_search = True
-    # one restart at a time, adding each curve as it finishes. Off by default
-    # now that a run covers two groups, since stepping through both of them is
-    # 2 * n_restarts pauses; turn it on to watch a single group land.
-    step_through = False
+    # ---- figures: set any of these to False to skip that figure ----------
+    plots = dict(
+        loss=True,           # loss of every restart over its search
+        loss_strips=True,    # loss decrease + Hessian spectrum strips under it
+        rank_map=True,       # Hessian rank of every restart (track_ranks groups)
+        dual_ranks=False,    # Hessian vs Jacobian rank at each point below tol
+        null_space=False,    # Jacobian null space at target vs points below tol
+        spectrum=False,      # target spectrum against every point below tol
+        coefficients=False,  # coefficients of every point below tol
+    )
 
+    do_search = True
+    step_through = False  # one restart at a time, drawing each as it lands
     n_restarts = 12
-    # Newton converges quadratically once it is near a solution, so this is a
-    # far shorter run than the gradient-descent one
     n_steps = 60
     log_every = 5
     tol = 1e-12
-    # how close two eigenvalues must sit to be read as one degenerate level
-    deg_tol = DEGEN_TOL
-    # print the Hessian eigenvalues and rank this often along one restart's
-    # search; None turns the read-out off. Every step, since a Newton run is
-    # only tens of steps long and the loss-decrease strip needs a Hessian
-    # sample under each of them to be read against.
-    hess_every = 1
-    # which restart is the one followed, when stepping through them in turn
+    deg_tol = DEGEN_TOL  # eigenvalues closer than this count as one level
+    hess_every = 1       # Hessian read-out period along restart hess_restart
+    rank_every = 1       # rank-map sampling period (a Hessian per restart)
     hess_restart = 0
 
-    # width of the restart cloud around the KW point
-    perturb_scale = 0.1
-    # spread of the arbitrary restarts over the whole coefficient space
-    random_scale = 1.0
+    perturb_scale = 0.1  # width of the restart cloud around the KW point
+    random_scale = 1.0   # spread of the arbitrary restarts
 
-    # Newton knobs. backtrack = 0 with step_scale = 1 is the plain iteration,
-    # which is what this runs: on this loss it reaches 1e-13 in about twenty
-    # steps. Raising backtrack halves any step that would climb, which stops a
-    # restart being thrown across the space by the indefinite Hessian between
-    # the basins, at the cost of freezing restarts that have to climb over a
-    # ridge to reach a dual. damping adds lambda*I to the Newton system, the
-    # Levenberg dial from Newton towards gradient descent.
+    # backtrack = 0, step_scale = 1 is the plain iteration; damping adds
+    # lambda * I to the Newton system (Levenberg)
     step_scale = 1.0
     backtrack = 0
     damping = 0.0
@@ -426,45 +361,78 @@ def main():
     c_targ = tr.tensor([[0, 0, h, J, 0, 0, 0, 0, h, -J, 0, 0]])
 
     get_loss = get_loss_factory(c_targ)
-
     run_restart = partial(
         run_newton, step_scale=step_scale, backtrack=backtrack, damping=damping,
     )
 
-    # the level structure every dual has to reproduce, printed before the
-    # search so the duals arriving below can be read against it
-    print_degeneracy(get_spectrum(c_targ)[0].numpy(), label="target", tol=deg_tol)
-    print_symmetry(get_spectrum(c_targ)[0].numpy(), label="target", tol=deg_tol)
+    spec_targ = get_spectrum(c_targ)[0].numpy()
+    print_degeneracy(spec_targ, label="target", tol=deg_tol)
+    print_symmetry(spec_targ, label="target", tol=deg_tol)
     rank_targ, _ = jacobian_rank(c_targ.numpy().reshape(-1))
     print(
         f"target Jacobian rank {rank_targ}/{2**n_qb}, so the duals through the "
         f"target itself form a {N_PARAMS - rank_targ}-dimensional family"
     )
 
-    # Two groups against the same target: restarts drawn from the whole
-    # coefficient space, and restarts clustered on the KW point. Both descend
-    # to the same spectrum, so the difference is which part of the isospectral
-    # set they land on - which is what the rank read-out is there to show.
+    # (label, artifact tag, initial points, track_ranks)
     groups = (
-        (
-            "KW neighbourhood",
-            f"local{perturb_scale:g}",
-            lambda: perturbed_inits(c_targ, n_restarts, scale=perturb_scale),
-        ),
-        (
-            "random restarts",
-            f"random{random_scale:g}",
-            lambda: random_inits(n_restarts, scale=random_scale),
-        ),
+        ("KW neighbourhood", f"local{perturb_scale:g}",
+         lambda: perturbed_inits(c_targ, n_restarts, scale=perturb_scale), True),
+        ("random restarts", f"random{random_scale:g}",
+         lambda: random_inits(n_restarts, scale=random_scale), True),
     )
 
-    for label, tag, make_init in groups:
+    results = [
         search_group(
             label, tag, make_init(), get_loss, c_targ, run_restart,
             do_search=do_search, step_through=step_through, n_steps=n_steps,
             log_every=log_every, tol=tol, deg_tol=deg_tol,
             hess_every=hess_every, hess_restart=hess_restart,
+            rank_every=rank_every if (plots["rank_map"] and track_ranks) else None,
         )
+        for label, tag, make_init, track_ranks in groups
+    ]
+
+    # ---- figures, toggled by plots at the top of main ----------------------
+    for r in results:
+        label, report = r["label"], r["report"]
+        live = r["drew_live"]  # step-through already drew loss/spectrum/coefs
+
+        if plots["loss"] and not live:
+            ax = plot_loss_history(
+                r["loss_history"],
+                r["hess_log"] if plots["loss_strips"] else None,
+                r["hess_restart"],
+            )
+            ax.set_title(f"{label}: {ax.get_title()}", color=INK)
+
+        if plots["rank_map"] and r["rank_log"]:
+            plot_rank_map(r["rank_log"], r["final_ranks"], r["losses"],
+                          tol=r["tol"], label=label)
+
+        if report is None:
+            continue
+
+        if plots["dual_ranks"]:
+            plot_dual_ranks(report["ranks_h"], report["ranks_j"], label=label,
+                            loss_tol=r["tol"])
+
+        if plots["null_space"]:
+            plot_null_space_comparison(r["C_dual"], r["c_targ"].numpy(),
+                                       label=label, loss_tol=r["tol"])
+
+        if plots["spectrum"] and not live:
+            # per-column notes only fit while each dual has its own column
+            plot_spectrum_views(
+                report["spec_targ"], report["spec_dual"], tol=r["deg_tol"],
+                col_notes=(report["notes"] if r["C_dual"].shape[0] <= MAX_SERIES
+                           else None),
+            )
+
+        if plots["coefficients"] and not live:
+            ax = plot_dual_coefficients(r["C_dual"], r["c_targ"].numpy(),
+                                        loss_tol=r["tol"])
+            ax.set_title(f"{label}: {ax.get_title()}", color=INK, fontsize=10)
 
     plt.show()
 

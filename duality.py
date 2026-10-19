@@ -1,26 +1,9 @@
 """Is an isospectral point a true dual, in the sense of Cotler et al.?
 
-Locality from the Spectrum (Cotler, Penington, Ranard) counts two Hamiltonians
-as dual when their spectra agree but they are not related by the trivial
-equivalences: a product of single-qubit unitaries, a permutation of the
-qubits, and transposition, in any composition. A search endpoint with zero
-loss has only passed the first test; check_dual runs the second.
-
-The second test is done two ways, strongest first:
-
-  1. Local invariants. Write H in the Pauli basis and group the coefficients
-     by support S, the set of qubits a string acts non-trivially on. A local
-     unitary rotates each qubit's (X, Y, Z) index by an SO(3), transposition
-     flips the sign of every Y, and a permutation relabels the supports - so
-     the norm of each support block, and the singular values of each
-     two-site block, are unchanged up to that relabelling. If those multisets
-     differ, no trivial equivalence exists and the point is a certified dual.
-  2. Search. Matching invariants are necessary, not sufficient, so the rest
-     is numerical: for every qubit permutation, with and without
-     transposition, minimise ||U G U^dag - H_targ|| over products U of
-     single-qubit unitaries. Finding a residual below tolerance exhibits the
-     equivalence; not finding one is evidence, not proof, and the verdict
-     says so.
+Two Hamiltonians are dual when they are isospectral but not related by local
+(single-qubit) unitaries, qubit permutations or transposition, in any
+composition. A mismatch in the local invariants certifies duality; otherwise
+the equivalence is searched for numerically, which is evidence, not proof.
 """
 
 import itertools as it
@@ -41,15 +24,9 @@ _PAULI = [
 
 @dataclass
 class DualCheck:
-    """What check_dual found for one point.
-
-    verdict is one of
-      "not isospectral"      - the spectra differ by more than spec_tol
-      "trivially equivalent" - a local unitary, permutation and transpose
-                               maps it onto the target; see perm, transposed
-      "dual (certified)"     - local invariants differ, so no such map exists
-      "dual (none found)"    - invariants agree and the search found no map;
-                               numerical evidence only
+    """check_dual's result. verdict is one of "not isospectral",
+    "trivially equivalent" (see perm, transposed), "dual (certified)"
+    (invariants differ) or "dual (none found)" (numerical evidence only).
     """
 
     verdict: str
@@ -71,11 +48,7 @@ def _hamiltonian(c):
 
 
 def pauli_coefficients(H, n=n_qb):
-    """(4,)*n real tensor h[s_1..s_n] = Tr(P_s H) / 2**n, site 0 first.
-
-    Index 0 is the identity on that site and 1, 2, 3 are X, Y, Z, in the same
-    kron order get_Hamiltonian builds H with.
-    """
+    """(4,)*n real tensor h[s] = Tr(P_s H) / 2**n; index 0 = I, 1..3 = X, Y, Z."""
     h = np.empty((4,) * n)
     for s in it.product(range(4), repeat=n):
         P = _PAULI[s[0]]
@@ -86,21 +59,15 @@ def pauli_coefficients(H, n=n_qb):
 
 
 def local_invariants(H, n=n_qb):
-    """Sorted invariants of H under local unitaries, permutations and transpose.
-
-    Returns a dict keyed by support size k: the sorted norms of every
-    support-k block, and for k == 2 also the sorted singular values of every
-    two-site block. Both are exact invariants of the whole trivial group, so
-    any mismatch rules out a trivial equivalence.
+    """Dict keyed by support size k: sorted norms of every support-k Pauli block,
+    plus "sv2", the sorted singular values of every two-site block.
     """
     h = pauli_coefficients(H, n)
     out = {}
     for k in range(1, n + 1):
         norms, svals = [], []
         for S in it.combinations(range(n), k):
-            # identity off S, non-identity (1..3) on S
-            idx = tuple(slice(1, 4) if q in S else 0 for q in range(n))
-            block = h[idx]
+            block = h[tuple(slice(1, 4) if q in S else 0 for q in range(n))]
             norms.append(np.linalg.norm(block))
             if k == 2:
                 svals.extend(np.linalg.svd(block, compute_uv=False))
@@ -118,17 +85,15 @@ def invariant_gap(H, H_targ, n=n_qb):
 
 def _permute_qubits(H, perm, n=n_qb):
     """H with qubit q moved to position perm[q]."""
-    T = H.reshape((2,) * (2 * n))
     axes = list(perm) + [n + p for p in perm]
-    return T.transpose(axes).reshape(2**n, 2**n)
+    return H.reshape((2,) * (2 * n)).transpose(axes).reshape(2**n, 2**n)
 
 
 def _local_unitary(theta, n=n_qb):
     """Product of single-qubit SU(2)s, exp(-i theta_q . sigma / 2) on qubit q."""
     sig = tr.tensor(np.stack(_PAULI[1:]))
     U = None
-    for q in range(n):
-        t = theta[q]
+    for t in theta[:n]:
         a = tr.sqrt((t**2).sum() + 1e-30)
         u = (tr.cos(a / 2) * tr.eye(2, dtype=tr.complex128)
              - 1j * tr.sin(a / 2) * tr.einsum("k,kab->ab", (t / a).to(tr.complex128), sig))
@@ -141,6 +106,11 @@ def _best_local_fit(G, H_targ, n=n_qb, n_restarts=16, rng=None):
     rng = np.random.default_rng(0) if rng is None else rng
     G_t, T_t = tr.tensor(G), tr.tensor(H_targ)
     scale = tr.linalg.norm(T_t)
+
+    def residual(theta):
+        U = _local_unitary(theta, n)
+        return tr.linalg.norm(U @ G_t @ U.conj().T - T_t) / scale
+
     best = np.inf
     for _ in range(n_restarts):
         theta = tr.tensor(rng.uniform(-np.pi, np.pi, size=(n, 3)), requires_grad=True)
@@ -149,31 +119,24 @@ def _best_local_fit(G, H_targ, n=n_qb, n_restarts=16, rng=None):
 
         def closure():
             opt.zero_grad()
-            U = _local_unitary(theta, n)
-            r = tr.linalg.norm(U @ G_t @ U.conj().T - T_t) / scale
+            r = residual(theta)
             r.backward()
             return r
 
         opt.step(closure)
         with tr.no_grad():
-            U = _local_unitary(theta, n)
-            r = (tr.linalg.norm(U @ G_t @ U.conj().T - T_t) / scale).item()
-        best = min(best, r)
+            best = min(best, residual(theta).item())
     return best
 
 
 def check_dual(c, c_targ, spec_tol=1e-5, equiv_tol=1e-5, n_restarts=16, seed=0):
     """Decide whether point c is a true dual of c_targ; returns a DualCheck.
 
-    spec_tol bounds the largest eigenvalue difference for "isospectral".
-    equiv_tol is how close (relative Frobenius distance, and absolute gap in
-    the local invariants) c must come to a trivial image of c_targ to count as
-    equivalent to it. A point within equiv_tol of an equivalent one is called
-    equivalent, even if it sits on a genuine dual family through it.
+    spec_tol bounds the eigenvalue difference; equiv_tol bounds both the
+    invariant gap and the relative fit residual for "trivially equivalent".
     """
     H, H_targ = _hamiltonian(c), _hamiltonian(c_targ)
-    lam, lam_t = np.linalg.eigvalsh(H), np.linalg.eigvalsh(H_targ)
-    spec_err = float(np.abs(lam - lam_t).max())
+    spec_err = float(np.abs(np.linalg.eigvalsh(H) - np.linalg.eigvalsh(H_targ)).max())
     gap = float(invariant_gap(H, H_targ))
 
     if spec_err > spec_tol:
@@ -181,18 +144,18 @@ def check_dual(c, c_targ, spec_tol=1e-5, equiv_tol=1e-5, n_restarts=16, seed=0):
     if gap > equiv_tol:
         return DualCheck("dual (certified)", spec_err, gap)
 
+    # matching invariants are only necessary, so search for the equivalence
     rng = np.random.default_rng(seed)
-    best = (np.inf, None, None)
+    best = np.inf
     for perm in it.permutations(range(n_qb)):
         for transposed in (False, True):
             G = _permute_qubits(H.T if transposed else H, perm)
             r = _best_local_fit(G, H_targ, n_restarts=n_restarts, rng=rng)
-            if r < best[0]:
-                best = (r, perm, transposed)
             if r < equiv_tol:
                 return DualCheck("trivially equivalent", spec_err, gap,
                                  r, perm, transposed)
-    return DualCheck("dual (none found)", spec_err, gap, best[0])
+            best = min(best, r)
+    return DualCheck("dual (none found)", spec_err, gap, best)
 
 
 def print_duality(C, c_targ, **kwargs):
@@ -201,6 +164,7 @@ def print_duality(C, c_targ, **kwargs):
     checks = []
     for i, c in enumerate(C):
         r = check_dual(c, c_targ, **kwargs)
+        checks.append(r)
         extra = ""
         if r.verdict == "trivially equivalent":
             extra = f"   perm {r.perm}, transposed {r.transposed}"
@@ -210,5 +174,4 @@ def print_duality(C, c_targ, **kwargs):
             f"  point {i}: {r.verdict:<21}  spectrum err {r.spectrum_error:.1e}"
             f"   invariant gap {r.invariant_gap:.1e}{extra}"
         )
-        checks.append(r)
     return checks

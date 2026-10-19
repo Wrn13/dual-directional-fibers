@@ -34,7 +34,7 @@ pauli = [
 ]
 
 # number of qubits
-n_qb = 3
+n_qb = 6
 
 
 def get_Hamiltonian(c):
